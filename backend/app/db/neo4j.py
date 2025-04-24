@@ -254,3 +254,183 @@ class Neo4jDatabase:
         except Exception as e:
             logger.exception(f"Error importing graph data: {str(e)}")
             return False
+    
+    async def create_protein_interaction(self, source_id: str, target_id: str, score: float, evidence: str = None) -> bool:
+        """Create an interaction relationship between two proteins with evidence."""
+        query = """
+        MATCH (source:Protein {id: $source_id})
+        MATCH (target:Protein {id: $target_id})
+        MERGE (source)-[r:INTERACTS_WITH {score: $score}]->(target)
+        SET r.evidence = $evidence,
+            r.source = $source,
+            r.last_updated = datetime()
+        RETURN r
+        """
+        results = await self.execute_query(query, {
+            "source_id": source_id,
+            "target_id": target_id,
+            "score": score,
+            "evidence": evidence or "",
+            "source": "STRING-db"
+        })
+        return len(results) > 0
+    
+    async def create_protein_disease_association(self, protein_id: str, disease_id: str, evidence: str) -> bool:
+        """Create an association between a protein and a disease."""
+        # First ensure the disease exists
+        disease_query = """
+        MERGE (d:Disease {id: $disease_id})
+        RETURN d
+        """
+        await self.execute_query(disease_query, {"disease_id": disease_id})
+        
+        # Then create the relationship
+        query = """
+        MATCH (p:Protein {id: $protein_id})
+        MATCH (d:Disease {id: $disease_id})
+        MERGE (p)-[r:ASSOCIATED_WITH]->(d)
+        ON CREATE SET r.evidence = $evidence, r.source = $source, r.last_updated = datetime()
+        ON MATCH SET r.evidence = $evidence, r.last_updated = datetime()
+        RETURN r
+        """
+        results = await self.execute_query(query, {
+            "protein_id": protein_id,
+            "disease_id": disease_id,
+            "evidence": evidence,
+            "source": "DisGeNET"
+        })
+        return len(results) > 0
+    
+    async def create_drug_protein_targeting(self, drug_id: str, protein_id: str, mechanism: str) -> bool:
+        """Create a targeting relationship between a drug and a protein."""
+        # First ensure the drug exists
+        drug_query = """
+        MERGE (d:Drug {id: $drug_id})
+        RETURN d
+        """
+        await self.execute_query(drug_query, {"drug_id": drug_id})
+        
+        # Then create the relationship
+        query = """
+        MATCH (d:Drug {id: $drug_id})
+        MATCH (p:Protein {id: $protein_id})
+        MERGE (d)-[r:TARGETS]->(p)
+        ON CREATE SET r.mechanism = $mechanism, r.source = $source, r.last_updated = datetime()
+        ON MATCH SET r.mechanism = $mechanism, r.last_updated = datetime()
+        RETURN r
+        """
+        results = await self.execute_query(query, {
+            "drug_id": drug_id,
+            "protein_id": protein_id,
+            "mechanism": mechanism,
+            "source": "DrugBank/ChEMBL"
+        })
+        return len(results) > 0
+        
+    async def create_protein_variant(self, variant_data: Dict[str, Any], protein_id: str) -> bool:
+        """Create a variant of a protein."""
+        if not variant_data.get('id'):
+            logger.error("Variant ID is required")
+            return False
+        
+        # Create the variant node
+        create_query = """
+        CREATE (v:Variant {
+            id: $id,
+            name: $name,
+            type: $type,
+            location: $location,
+            original_residue: $original_residue,
+            variant_residue: $variant_residue,
+            effect: $effect,
+            clinical_significance: $clinical_significance
+        })
+        RETURN v
+        """
+        
+        # Set default values for optional fields
+        params = {
+            'id': variant_data['id'],
+            'name': variant_data.get('name', ''),
+            'type': variant_data.get('type', ''),
+            'location': variant_data.get('location', 0),
+            'original_residue': variant_data.get('original_residue', ''),
+            'variant_residue': variant_data.get('variant_residue', ''),
+            'effect': variant_data.get('effect', ''),
+            'clinical_significance': variant_data.get('clinical_significance', '')
+        }
+        
+        results = await self.execute_query(create_query, params)
+        if len(results) == 0:
+            return False
+        
+        # Create the relationship to the protein
+        relation_query = """
+        MATCH (v:Variant {id: $variant_id})
+        MATCH (p:Protein {id: $protein_id})
+        MERGE (v)-[r:VARIANT_OF]->(p)
+        RETURN r
+        """
+        
+        results = await self.execute_query(relation_query, {
+            "variant_id": variant_data['id'],
+            "protein_id": protein_id
+        })
+        
+        return len(results) > 0
+
+    async def create_disease(self, disease_data: Dict[str, Any]) -> bool:
+        """Create a new disease node in the database."""
+        if not disease_data.get('id'):
+            logger.error("Disease ID is required")
+            return False
+        
+        query = """
+        MERGE (d:Disease {id: $id})
+        ON CREATE SET 
+            d.name = $name,
+            d.description = $description,
+            d.source = $source
+        RETURN d
+        """
+        
+        params = {
+            'id': disease_data['id'],
+            'name': disease_data.get('name', ''),
+            'description': disease_data.get('description', ''),
+            'source': disease_data.get('source', 'external-api')
+        }
+        
+        results = await self.execute_query(query, params)
+        return len(results) > 0
+    
+    async def create_drug(self, drug_data: Dict[str, Any]) -> bool:
+        """Create a new drug node in the database."""
+        if not drug_data.get('drug_id'):
+            logger.error("Drug ID is required")
+            return False
+        
+        query = """
+        MERGE (d:Drug {id: $id})
+        ON CREATE SET 
+            d.name = $name,
+            d.description = $description,
+            d.mechanism = $mechanism,
+            d.source = $source
+        RETURN d
+        """
+        
+        params = {
+            'id': drug_data['drug_id'],
+            'name': drug_data.get('name', ''),
+            'description': drug_data.get('description', ''),
+            'mechanism': drug_data.get('mechanism', ''),
+            'source': drug_data.get('source', 'external-api')
+        }
+        
+        results = await self.execute_query(query, params)
+        return len(results) > 0
+        
+    async def run_query(self, query: str, parameters: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+        """Run a custom Cypher query and return the results."""
+        return await self.execute_query(query, parameters)

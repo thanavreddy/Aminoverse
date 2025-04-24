@@ -105,388 +105,1044 @@ class ProteinService:
     
     async def get_protein_structure(self, protein_id: str) -> Dict[str, Any]:
         """
-        Get protein structure information.
+        Get 3D structure information for a protein.
+        
+        Attempts to retrieve from:
+        1. PDB (experimental structures)
+        2. AlphaFold DB (predicted structures)
+        """
+        # Check cache first
+        cache_key = f"structure:{protein_id}"
+        cached_data = await self.redis_client.get(cache_key)
+        if cached_data:
+            logger.info(f"Retrieved structure data for {protein_id} from cache")
+            return json.loads(cached_data)
+        
+        # Try to get experimental structure from PDB
+        try:
+            pdb_data = await self._query_pdb(protein_id)
+            if pdb_data and pdb_data.get('pdb_id'):
+                # Cache the result
+                await self.redis_client.set(cache_key, json.dumps(pdb_data), expire=86400)
+                return pdb_data
+        except Exception as e:
+            logger.warning(f"Error querying PDB for {protein_id}: {str(e)}")
+        
+        # If no PDB structure, try AlphaFold
+        try:
+            alphafold_data = await self._query_alphafold(protein_id)
+            if alphafold_data and alphafold_data.get('alphafold_id'):
+                # Cache the result
+                await self.redis_client.set(cache_key, json.dumps(alphafold_data), expire=86400)
+                return alphafold_data
+        except Exception as e:
+            logger.warning(f"Error querying AlphaFold for {protein_id}: {str(e)}")
+        
+        # If we get here, no structure was found
+        result = {"status": "unavailable", "message": f"No structure data found for {protein_id}"}
+        await self.redis_client.set(cache_key, json.dumps(result), expire=3600)  # Cache for shorter time
+        return result
+        
+    async def _query_pdb(self, uniprot_id: str) -> Dict[str, Any]:
+        """
+        Query PDB API to get protein structure data for a UniProt ID
+        """
+        logger.info(f"Querying PDB for protein: {uniprot_id}")
+        
+        try:
+            # Step 1: Search for structures containing the UniProt ID
+            search_url = f"{self.pdb_api_url}/search/polymer_entity"
+            
+            # Constructing proper search query that matches PDB API requirements
+            search_payload = {
+                "query": {
+                    "type": "terminal",
+                    "service": "text",
+                    "parameters": {
+                        "attribute": "rcsb_polymer_entity_container_identifiers.reference_sequence_identifiers.database_accession",
+                        "operator": "exact_match",
+                        "value": uniprot_id
+                    }
+                },
+                "return_type": "polymer_entity",
+                "request_options": {
+                    "pager": {
+                        "start": 0,
+                        "rows": 100
+                    },
+                    "scoring_strategy": "combined",
+                    "sort": [
+                        {
+                            "sort_by": "rcsb_entry_info.resolution_combined",
+                            "direction": "asc"
+                        }
+                    ]
+                }
+            }
+            
+            async with httpx.AsyncClient() as client:
+                # Step 1: Search for PDB IDs
+                response = await client.post(search_url, json=search_payload)
+                
+                if response.status_code != 200:
+                    logger.error(f"PDB search failed with status {response.status_code}: {response.text}")
+                    return {}
+                
+                search_data = response.json()
+                result_ids = search_data.get("result_set", [])
+                
+                if not result_ids:
+                    logger.warning(f"No PDB structures found for {uniprot_id}")
+                    return {}
+                
+                # Get the best structure (first result sorted by resolution)
+                best_match = result_ids[0]
+                entity_id = best_match.get("identifier", "").split('_')[0]
+                
+                if not entity_id:
+                    logger.error("Failed to extract entity ID from search results")
+                    return {}
+                
+                # Step 2: Get structure details
+                structure_url = f"{self.pdb_api_url}/graphql"
+                graphql_query = {
+                    "query": """
+                    query StructureQuery($id: String!) {
+                        entry(entry_id: $id) {
+                            rcsb_id
+                            struct {
+                                title
+                                pdbx_descriptor
+                            }
+                            rcsb_entry_info {
+                                resolution_combined
+                                experimental_method
+                                structure_determination_methodology  
+                            }
+                            polymer_entities {
+                                rcsb_id
+                                entity_poly {
+                                    pdbx_seq_one_letter_code
+                                }
+                                rcsb_polymer_entity {
+                                    pdbx_description
+                                }
+                            }
+                        }
+                    }
+                    """,
+                    "variables": {
+                        "id": entity_id
+                    }
+                }
+                
+                struct_response = await client.post(structure_url, json=graphql_query)
+                
+                if struct_response.status_code != 200:
+                    logger.error(f"PDB structure query failed with status {struct_response.status_code}")
+                    return {}
+                
+                struct_data = struct_response.json()
+                entry_data = struct_data.get("data", {}).get("entry", {})
+                
+                if not entry_data:
+                    logger.error("Failed to retrieve structure details")
+                    return {}
+                
+                # Step 3: Prepare structure data in the format expected by the frontend
+                structure_data = {
+                    "pdb_id": entity_id,
+                    "title": entry_data.get("struct", {}).get("title", ""),
+                    "description": entry_data.get("struct", {}).get("pdbx_descriptor", ""),
+                    "resolution": entry_data.get("rcsb_entry_info", {}).get("resolution_combined"),
+                    "method": entry_data.get("rcsb_entry_info", {}).get("experimental_method", ""),
+                    "polymer_entities": [
+                        {
+                            "entity_id": entity.get("rcsb_id", ""),
+                            "description": entity.get("rcsb_polymer_entity", {}).get("pdbx_description", ""),
+                            "sequence": entity.get("entity_poly", {}).get("pdbx_seq_one_letter_code", "")
+                        }
+                        for entity in entry_data.get("polymer_entities", [])
+                    ],
+                    "viewer_url": f"https://www.rcsb.org/3d-view/{entity_id}",
+                    "download_url": f"https://files.rcsb.org/download/{entity_id}.pdb"
+                }
+                
+                return structure_data
+        
+        except Exception as e:
+            logger.error(f"Error querying PDB API: {str(e)}")
+            return {}
+    
+    async def _query_alphafold(self, protein_id: str) -> Dict[str, Any]:
+        """
+        Query the AlphaFold DB API to get predicted structure information.
+        """
+        logger.info(f"Querying AlphaFold DB for {protein_id} structure")
+        
+        try:
+            # AlphaFold DB doesn't have a formal API, but we can check if a structure exists
+            # by trying to access the metadata JSON
+            uniprot_id = protein_id.split('-')[0] if '-' in protein_id else protein_id
+            metadata_url = f"https://alphafold.ebi.ac.uk/api/prediction/{uniprot_id}"
+            
+            async with httpx.AsyncClient() as client:
+                response = await client.get(metadata_url, timeout=10.0)
+                
+                if response.status_code == 200:
+                    # Structure exists
+                    metadata = response.json()
+                    
+                    # Return the structure data
+                    structure_data = {
+                        "alphafold_id": uniprot_id,
+                        "status": "available",
+                        "source": "alphafold",
+                        "confidence": metadata.get("confidenceAvgLocalScore", None),
+                        "length": metadata.get("uniprotLength", None)
+                    }
+                    
+                    return structure_data
+                else:
+                    logger.info(f"No AlphaFold structure found for {protein_id}")
+                    return {}
+                    
+        except Exception as e:
+            logger.error(f"Error querying AlphaFold DB for {protein_id}: {str(e)}")
+            raise
+    
+    async def get_protein_interactions(self, protein_id: str) -> List[Dict[str, Any]]:
+        """
+        Get protein-protein interactions for a given protein.
+        Uses STRING database or internal knowledge graph.
+        """
+        # Check cache first
+        cache_key = f"interactions:{protein_id}"
+        cached_data = await self.redis_client.get(cache_key)
+        if cached_data:
+            logger.info(f"Retrieved interaction data for {protein_id} from cache")
+            return json.loads(cached_data)
+        
+        # Check knowledge graph
+        kg_interactions = await self.db.get_protein_interactions(protein_id)
+        if kg_interactions:
+            logger.info(f"Retrieved interaction data for {protein_id} from knowledge graph")
+            # Cache the result
+            await self.redis_client.set(cache_key, json.dumps(kg_interactions), expire=86400)
+            return kg_interactions
+        
+        # Query STRING database
+        try:
+            logger.info(f"Querying STRING DB for interactions with {protein_id}")
+            
+            # Use gene symbol from UniProt if available
+            uniprot_data = await self._fetch_uniprot_data(protein_id)
+            gene_symbol = uniprot_data.get("name", protein_id) if uniprot_data else protein_id
+            
+            # STRING API endpoint
+            api_url = "https://string-db.org/api/json/network"
+            
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    api_url,
+                    params={
+                        "identifiers": gene_symbol,
+                        "species": 9606,  # Human
+                        "limit": 50,
+                        "network_type": "physical",
+                        "required_score": 700,  # High confidence (0-1000)
+                        "add_nodes": 15,  # Add up to 15 indirect interactors
+                    },
+                    timeout=15.0
+                )
+                
+                if response.status_code != 200:
+                    logger.warning(f"STRING-db API returned status code {response.status_code}")
+                    return await self._query_biogrid_interactions(protein_id)
+                    
+                data = response.json()
+                
+                # Format the response for our API
+                formatted_interactions = []
+                for interaction in data:
+                    # Skip if it's not our target protein
+                    if interaction.get("preferredName_A") != gene_symbol and interaction.get("preferredName_B") != gene_symbol:
+                        continue
+                    
+                    # Determine which is the interaction partner
+                    is_a_query = interaction.get("preferredName_A") == gene_symbol
+                    partner_id = interaction.get("stringId_B" if is_a_query else "stringId_A", "")
+                    partner_name = interaction.get("preferredName_B" if is_a_query else "preferredName_A", "")
+                    
+                    # Skip self-interactions
+                    if partner_id == protein_id or partner_name == gene_symbol:
+                        continue
+                    
+                    score = float(interaction.get("score", 0)) / 1000.0  # Normalize to 0-1
+                    
+                    formatted_interactions.append({
+                        "protein_id": partner_id,
+                        "protein_name": partner_name,
+                        "score": score,
+                        "evidence": interaction.get("evidence", ""),
+                        "source": "STRING-db"
+                    })
+                
+                # Cache the result
+                if formatted_interactions:
+                    await self.redis_client.set(cache_key, json.dumps(formatted_interactions), expire=86400)
+                    
+                    # Optionally save to knowledge graph
+                    for interaction in formatted_interactions:
+                        try:
+                            await self.db.create_protein_interaction(
+                                protein_id, 
+                                interaction["protein_id"],
+                                interaction["score"]
+                            )
+                        except Exception as e:
+                            logger.error(f"Error storing interaction in KG: {str(e)}")
+                
+                return formatted_interactions
+        
+        except Exception as e:
+            logger.error(f"Error querying STRING DB for {protein_id}: {str(e)}")
+            
+            # Try BioGRID as a fallback
+            try:
+                return await self._query_biogrid_interactions(protein_id)
+            except Exception as biogrid_error:
+                logger.error(f"Error querying BioGRID for {protein_id}: {str(biogrid_error)}")
+        
+        # Return empty list if no interactions found
+        return []
+
+    async def _query_biogrid_interactions(self, protein_id: str) -> List[Dict[str, Any]]:
+        """
+        Query BioGRID database for protein-protein interactions as fallback
+        """
+        logger.info(f"Querying BioGRID for interactions with {protein_id}")
+        
+        try:
+            # First get the gene symbol from protein data
+            protein_data = await self.get_protein_info(protein_id)
+            gene_symbol = protein_data.get("name", "")
+            
+            if not gene_symbol:
+                return []
+                
+            # BioGRID API endpoint
+            api_url = "https://webservice.thebiogrid.org/interactions"
+            
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    api_url,
+                    params={
+                        "geneList": gene_symbol,
+                        "searchNames": "true",
+                        "includeInteractors": "true",
+                        "format": "json",
+                        "taxId": 9606,  # Human
+                        "accessKey": settings.BIOGRID_API_KEY
+                    },
+                    timeout=15.0
+                )
+                
+                if response.status_code != 200:
+                    return []
+                    
+                data = response.json()
+                
+                # Format the interaction data
+                formatted_interactions = []
+                seen_partners = set()
+                
+                for interaction_id, interaction in data.items():
+                    # Determine which is the interaction partner
+                    is_a_interactor = interaction.get("OFFICIAL_SYMBOL_A") == gene_symbol
+                    partner_symbol = interaction.get("OFFICIAL_SYMBOL_B" if is_a_interactor else "OFFICIAL_SYMBOL_A")
+                    partner_id = interaction.get("ENTREZ_GENE_B" if is_a_interactor else "ENTREZ_GENE_A")
+                    
+                    # Skip self-interactions and duplicates
+                    if partner_symbol == gene_symbol or partner_symbol in seen_partners:
+                        continue
+                        
+                    seen_partners.add(partner_symbol)
+                    
+                    # Default confidence score based on experimental evidence
+                    score = 0.7  # Medium-high confidence
+                    
+                    formatted_interactions.append({
+                        "protein_id": partner_id,
+                        "protein_name": partner_symbol,
+                        "score": score,
+                        "evidence": interaction.get("EXPERIMENTAL_SYSTEM", ""),
+                        "source": "BioGRID"
+                    })
+                
+                return formatted_interactions
+        except Exception as e:
+            logger.error(f"Error querying BioGRID: {str(e)}")
+            return []
+
+    async def get_disease_associations(self, protein_id: str) -> List[Dict[str, Any]]:
+        """
+        Get diseases associated with a protein.
+        Uses DisGeNET or internal knowledge graph.
+        """
+        # Check cache first
+        cache_key = f"diseases:{protein_id}"
+        cached_data = await self.redis_client.get(cache_key)
+        if cached_data:
+            logger.info(f"Retrieved disease data for {protein_id} from cache")
+            return json.loads(cached_data)
+        
+        # Check knowledge graph
+        kg_diseases = await self.db.get_protein_diseases(protein_id)
+        if kg_diseases:
+            logger.info(f"Retrieved disease data for {protein_id} from knowledge graph")
+            # Cache the result
+            await self.redis_client.set(cache_key, json.dumps(kg_diseases), expire=86400)
+            return kg_diseases
+        
+        # Query DisGeNET API
+        try:
+            # DisGeNET uses gene symbols, so we might need to convert UniProt ID to gene symbol
+            # For simplicity, we'll assume the gene symbol is in the protein data
+            protein_data = await self.get_protein_info(protein_id)
+            gene_symbol = protein_data.get("name", "")
+            
+            if not gene_symbol:
+                logger.warning(f"Could not find gene symbol for {protein_id}")
+                return []
+                
+            logger.info(f"Querying DisGeNET for disease associations with gene {gene_symbol}")
+            
+            # DisGeNET API endpoint for gene-disease associations
+            api_url = "https://www.disgenet.org/api/gda/gene"
+            
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    api_url,
+                    params={"gene_symbol": gene_symbol},
+                    headers={"Authorization": f"Bearer {settings.DISGENET_API_KEY}"},
+                    timeout=15.0
+                )
+                
+                if response.status_code != 200:
+                    logger.warning(f"DisGeNET API returned status code {response.status_code}")
+                    return []
+                    
+                data = response.json()
+                
+                # Format the disease associations for our API
+                formatted_diseases = []
+                for association in data.get("results", []):
+                    disease_data = {
+                        "disease_id": association.get("diseaseId"),
+                        "name": association.get("diseaseName"),
+                        "score": association.get("score"),
+                        "evidence": association.get("nofPmids", 0),
+                        "source": "DisGeNET"
+                    }
+                    formatted_diseases.append(disease_data)
+                    
+                    # Optionally store in knowledge graph for future use
+                    try:
+                        await self.db.create_protein_disease_association(
+                            protein_id,
+                            disease_data["disease_id"],
+                            f"DisGeNET score: {disease_data['score']}, PMIDs: {disease_data['evidence']}"
+                        )
+                    except Exception as e:
+                        logger.error(f"Error storing disease association in KG: {str(e)}")
+                
+                # Cache the result
+                if formatted_diseases:
+                    await self.redis_client.set(cache_key, json.dumps(formatted_diseases), expire=86400)
+                    
+                return formatted_diseases
+        
+        except Exception as e:
+            logger.error(f"Error querying DisGeNET for {protein_id}: {str(e)}")
+            
+            # Try CTD as fallback
+            try:
+                return await self._query_ctd_diseases(protein_id)
+            except Exception as ctd_error:
+                logger.error(f"Error querying CTD for {protein_id}: {str(ctd_error)}")
+        
+        # Return empty list if no disease data found
+        logger.info(f"No disease data found for {protein_id}")
+        return []
+
+    async def _query_ctd_diseases(self, protein_id: str) -> List[Dict[str, Any]]:
+        """
+        Query the CTD (Comparative Toxicogenomics Database) for disease associations as fallback
+        """
+        logger.info(f"Querying CTD for disease associations with {protein_id}")
+        
+        try:
+            protein_data = await self.get_protein_info(protein_id)
+            gene_symbol = protein_data.get("name", "")
+            
+            if not gene_symbol:
+                return []
+                
+            # CTD API endpoint for gene-disease associations
+            api_url = "http://ctdbase.org/tools/batchQuery.go"
+            
+            async with httpx.AsyncClient() as client:
+                # CTD doesn't have a formal API, so we simulate a form submission
+                form_data = {
+                    "inputType": "gene",
+                    "inputTerms": gene_symbol,
+                    "report": "diseases",
+                    "format": "json"
+                }
+                
+                response = await client.post(api_url, data=form_data)
+                
+                if response.status_code != 200:
+                    return []
+                    
+                data = response.json()
+                
+                # Format for our API
+                formatted_diseases = []
+                for association in data.get("results", []):
+                    disease_data = {
+                        "disease_id": association.get("DiseaseID"),
+                        "name": association.get("DiseaseName"),
+                        "evidence": association.get("DirectEvidence", ""),
+                        "source": "CTD"
+                    }
+                    formatted_diseases.append(disease_data)
+                
+                return formatted_diseases
+        except Exception as e:
+            logger.error(f"Error querying CTD: {str(e)}")
+            return []
+    
+    async def get_drug_interactions(self, protein_id: str) -> List[Dict[str, Any]]:
+        """
+        Get drugs that interact with a protein.
+        Uses DrugBank and ChEMBL data or internal knowledge graph.
+        """
+        # Check cache first
+        cache_key = f"drugs:{protein_id}"
+        cached_data = await self.redis_client.get(cache_key)
+        if cached_data:
+            logger.info(f"Retrieved drug interaction data for {protein_id} from cache")
+            return json.loads(cached_data)
+        
+        # Check knowledge graph
+        kg_drugs = await self.db.get_protein_drugs(protein_id)
+        if kg_drugs:
+            logger.info(f"Retrieved drug data for {protein_id} from knowledge graph")
+            # Cache the result
+            await self.redis_client.set(cache_key, json.dumps(kg_drugs), expire=86400)
+            return kg_drugs
+        
+        # Query DrugBank API
+        try:
+            # First get the gene symbol from protein data
+            protein_data = await self.get_protein_info(protein_id)
+            gene_symbol = protein_data.get("name", "")
+            
+            if not gene_symbol:
+                return []
+                
+            logger.info(f"Querying DrugBank for drug targets of {gene_symbol}")
+            
+            # DrugBank API requires authentication
+            api_url = "https://go.drugbank.com/api/v1/targets"
+            
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    api_url,
+                    params={"q": gene_symbol, "format": "json"},
+                    headers={"Authorization": f"Bearer {settings.DRUGBANK_API_KEY}"},
+                    timeout=15.0
+                )
+                
+                if response.status_code != 200:
+                    logger.warning(f"DrugBank API returned status code {response.status_code}")
+                    # Try ChEMBL as fallback
+                    return await self._query_chembl_drugs(gene_symbol)
+                    
+                data = response.json()
+                
+                # Format the drug data for our API
+                formatted_drugs = []
+                for target in data.get("targets", []):
+                    for drug in target.get("drugs", []):
+                        drug_data = {
+                            "drug_id": drug.get("drugbank_id"),
+                            "name": drug.get("name"),
+                            "description": drug.get("description", ""),
+                            "mechanism": drug.get("mechanism_of_action", ""),
+                            "source": "DrugBank"
+                        }
+                        formatted_drugs.append(drug_data)
+                        
+                        # Store in knowledge graph
+                        try:
+                            await self.db.create_drug_protein_targeting(
+                                drug_data["drug_id"],
+                                protein_id,
+                                drug_data["mechanism"]
+                            )
+                        except Exception as e:
+                            logger.error(f"Error storing drug in KG: {str(e)}")
+                
+                # Cache the result
+                if formatted_drugs:
+                    await self.redis_client.set(cache_key, json.dumps(formatted_drugs), expire=86400)
+                    
+                return formatted_drugs
+                    
+        except Exception as e:
+            logger.error(f"Error querying DrugBank for {protein_id}: {str(e)}")
+            
+            # Try ChEMBL as fallback
+            try:
+                protein_data = await self.get_protein_info(protein_id)
+                gene_symbol = protein_data.get("name", "")
+                return await self._query_chembl_drugs(gene_symbol)
+            except Exception as chembl_error:
+                logger.error(f"Error querying ChEMBL for {protein_id}: {str(chembl_error)}")
+        
+        # Return empty list if no drug data found
+        logger.info(f"No drug interaction data found for {protein_id}")
+        return []
+
+    async def _query_chembl_drugs(self, gene_symbol: str) -> List[Dict[str, Any]]:
+        """
+        Query ChEMBL database for drug-protein interactions as fallback
+        """
+        logger.info(f"Querying ChEMBL for drug targets of gene {gene_symbol}")
+        
+        try:
+            # ChEMBL API endpoint
+            api_url = f"https://www.ebi.ac.uk/chembl/api/data/target.json"
+            
+            async with httpx.AsyncClient() as client:
+                # First find the ChEMBL target ID for the gene
+                response = await client.get(
+                    api_url,
+                    params={"target_components__target_component_synonyms__component_synonym__icontains": gene_symbol},
+                    timeout=15.0
+                )
+                
+                if response.status_code != 200:
+                    return []
+                    
+                data = response.json()
+                
+                if not data.get("targets"):
+                    return []
+                    
+                # Get the first target's ChEMBL ID
+                chembl_id = data["targets"][0]["target_chembl_id"]
+                
+                # Now search for compounds targeting this target
+                compounds_url = f"https://www.ebi.ac.uk/chembl/api/data/activity.json"
+                compound_response = await client.get(
+                    compounds_url,
+                    params={"target_chembl_id": chembl_id, "limit": 20},
+                    timeout=15.0
+                )
+                
+                if compound_response.status_code != 200:
+                    return []
+                    
+                compounds_data = compound_response.json()
+                
+                # Format the drug data
+                formatted_drugs = []
+                seen_drugs = set()
+                
+                for activity in compounds_data.get("activities", []):
+                    drug_id = activity.get("molecule_chembl_id")
+                    
+                    # Skip duplicates
+                    if drug_id in seen_drugs:
+                        continue
+                        
+                    seen_drugs.add(drug_id)
+                    
+                    drug_data = {
+                        "drug_id": drug_id,
+                        "name": activity.get("molecule_pref_name", drug_id),
+                        "description": f"Activity: {activity.get('standard_value', 'Unknown')} {activity.get('standard_units', '')}",
+                        "mechanism": activity.get("target_type", ""),
+                        "source": "ChEMBL"
+                    }
+                    
+                    formatted_drugs.append(drug_data)
+                
+                return formatted_drugs
+        except Exception as e:
+            logger.error(f"Error querying ChEMBL: {str(e)}")
+            return []
+
+    async def get_protein_variants(self, uniprot_id: str) -> List[Dict[str, Any]]:
+        """
+        Get protein variants information from cache, knowledge graph, or external APIs
+        
+        Args:
+            uniprot_id: UniProt ID of the protein
+            
+        Returns:
+            List of variant objects with variant information
+        """
+        cache_key = f"protein_variants:{uniprot_id}"
+        cached_data = await self.redis_client.get(cache_key)
+        
+        if cached_data:
+            logger.info(f"Retrieved protein variants for {uniprot_id} from cache")
+            return json.loads(cached_data)
+        
+        # Try to get variants from knowledge graph
+        variants = await self._get_variants_from_kg(uniprot_id)
+        if variants:
+            await self.redis_client.set(cache_key, json.dumps(variants), expire=86400)  # Cache for 24 hours
+            return variants
+            
+        # If not in KG, query external APIs like ClinVar
+        variants = await self._query_variant_apis(uniprot_id)
+        
+        if variants:
+            await self.redis_client.set(cache_key, json.dumps(variants), expire=86400)
+            
+            # Optionally store in KG for future use
+            await self._store_variants_in_kg(uniprot_id, variants)
+        
+        return variants
+
+    async def _get_variants_from_kg(self, uniprot_id: str) -> List[Dict[str, Any]]:
+        """
+        Get protein variants from knowledge graph
+        """
+        query = """
+        MATCH (p:Protein {uniprot_id: $uniprot_id})-[r:HAS_VARIANT]->(v:Variant)
+        RETURN v.variant_id as id, v.position as position, v.original as original,
+               v.variant as variant, v.effect as effect, v.clinical_significance as clinical_significance,
+               v.source as source
+        """
+        
+        try:
+            result = await self.db.run_query(query, {"uniprot_id": uniprot_id})
+            
+            if not result:
+                return []
+                
+            variants = []
+            for record in result:
+                variant_data = {
+                    "id": record.get("id"),
+                    "position": record.get("position"),
+                    "original": record.get("original"),
+                    "variant": record.get("variant"),
+                    "effect": record.get("effect"),
+                    "clinical_significance": record.get("clinical_significance"),
+                    "source": record.get("source")
+                }
+                variants.append(variant_data)
+                
+            logger.info(f"Retrieved {len(variants)} variants from knowledge graph for {uniprot_id}")
+            return variants
+            
+        except Exception as e:
+            logger.error(f"Error retrieving variants from KG: {str(e)}")
+            return []
+
+    async def _query_variant_apis(self, uniprot_id: str) -> List[Dict[str, Any]]:
+        """
+        Query external APIs like ClinVar and Ensembl for protein variants
+        """
+        logger.info(f"Querying variant data for {uniprot_id}")
+        
+        try:
+            # First get the gene symbol from protein data to use with ClinVar
+            protein_data = await self.get_protein_info(uniprot_id)
+            gene_symbol = protein_data.get("name", "")
+            
+            if not gene_symbol:
+                logger.warning(f"Could not find gene symbol for {uniprot_id}")
+                return []
+                
+            # Try Ensembl first for genomic variants
+            variants = await self._query_ensembl_variants(gene_symbol)
+            
+            # If Ensembl didn't return results, try ClinVar
+            if not variants:
+                variants = await self._query_clinvar_variants(gene_symbol)
+                
+            return variants
+        except Exception as e:
+            logger.error(f"Error querying variant APIs: {str(e)}")
+            return []
+        
+    async def _query_ensembl_variants(self, gene_symbol: str) -> List[Dict[str, Any]]:
+        """
+        Query Ensembl for variants associated with a gene
+        """
+        logger.info(f"Querying Ensembl for variants of gene {gene_symbol}")
+        
+        try:
+            # Ensembl REST API endpoint
+            api_url = "https://rest.ensembl.org/variation/human"
+            
+            async with httpx.AsyncClient() as client:
+                headers = {"Content-Type": "application/json", "Accept": "application/json"}
+                
+                # First get the Ensembl gene ID
+                lookup_url = f"https://rest.ensembl.org/lookup/symbol/homo_sapiens/{gene_symbol}"
+                response = await client.get(lookup_url, headers=headers, timeout=15.0)
+                
+                if response.status_code != 200:
+                    logger.warning(f"Ensembl gene lookup failed with status {response.status_code}")
+                    return []
+                    
+                gene_data = response.json()
+                gene_id = gene_data.get("id")
+                
+                if not gene_id:
+                    return []
+                    
+                # Now get variants for this gene
+                variants_url = f"https://rest.ensembl.org/overlap/id/{gene_id}"
+                response = await client.get(
+                    variants_url, 
+                    headers=headers,
+                    params={"feature": "variation"},
+                    timeout=15.0
+                )
+                
+                if response.status_code != 200:
+                    logger.warning(f"Ensembl variants query failed with status {response.status_code}")
+                    return []
+                    
+                variants_data = response.json()
+                
+                # Format the variant data for our API
+                formatted_variants = []
+                for variant in variants_data[:50]:  # Limit to 50 variants
+                    variant_id = variant.get("id")
+                    
+                    # Get additional details about this variant
+                    detail_url = f"https://rest.ensembl.org/variation/human/{variant_id}"
+                    detail_response = await client.get(detail_url, headers=headers)
+                    
+                    if detail_response.status_code != 200:
+                        continue
+                        
+                    detail_data = detail_response.json()
+                    
+                    variant_data = {
+                        "id": variant_id,
+                        "position": variant.get("start"),
+                        "original": detail_data.get("ancestral_allele", ""),
+                        "variant": ", ".join(detail_data.get("alleles", [])),
+                        "clinical_significance": detail_data.get("clinical_significance", ""),
+                        "effect": detail_data.get("most_severe_consequence", ""),
+                        "source": "Ensembl"
+                    }
+                    
+                    formatted_variants.append(variant_data)
+                
+                return formatted_variants
+        except Exception as e:
+            logger.error(f"Error querying Ensembl: {str(e)}")
+            return []
+            
+    async def _query_clinvar_variants(self, gene_symbol: str) -> List[Dict[str, Any]]:
+        """
+        Query ClinVar for variants associated with a gene
+        """
+        logger.info(f"Querying ClinVar for variants of gene {gene_symbol}")
+        
+        try:
+            # ClinVar API endpoint through NCBI's E-utilities
+            api_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+            
+            async with httpx.AsyncClient() as client:
+                # First search for the gene in ClinVar
+                search_response = await client.get(
+                    api_url,
+                    params={
+                        "db": "clinvar",
+                        "term": f"{gene_symbol}[gene]",
+                        "retmode": "json",
+                        "retmax": 100
+                    },
+                    timeout=15.0
+                )
+                
+                if search_response.status_code != 200:
+                    return []
+                    
+                search_data = search_response.json()
+                variant_ids = search_data.get("esearchresult", {}).get("idlist", [])
+                
+                if not variant_ids:
+                    return []
+                    
+                # Now fetch details for these variants
+                summary_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
+                summary_response = await client.get(
+                    summary_url,
+                    params={
+                        "db": "clinvar",
+                        "id": ",".join(variant_ids[:50]),  # Limit to 50 variants
+                        "retmode": "json"
+                    },
+                    timeout=15.0
+                )
+                
+                if summary_response.status_code != 200:
+                    return []
+                    
+                summary_data = summary_response.json()
+                result = summary_data.get("result", {})
+                
+                # Format the variant data
+                formatted_variants = []
+                
+                for variant_id in variant_ids[:50]:
+                    variant = result.get(variant_id, {})
+                    
+                    if not variant:
+                        continue
+                    
+                    # Extract HGVS notation to get position and change
+                    hgvs = variant.get("title", "")
+                    position = None
+                    original = ""
+                    variant_aa = ""
+                    
+                    # Parse HGVS notation (e.g., NP_001289726.1:p.Val600Glu)
+                    import re
+                    match = re.search(r'p\.([A-Za-z]+)(\d+)([A-Za-z]+)', hgvs)
+                    if match:
+                        original = match.group(1)
+                        position = match.group(2)
+                        variant_aa = match.group(3)
+                    
+                    variant_data = {
+                        "id": f"ClinVar:{variant_id}",
+                        "position": position,
+                        "original": original,
+                        "variant": variant_aa,
+                        "clinical_significance": variant.get("clinical_significance", {}).get("description", ""),
+                        "effect": variant.get("variation_type", ""),
+                        "source": "ClinVar"
+                    }
+                    
+                    formatted_variants.append(variant_data)
+                
+                return formatted_variants
+        except Exception as e:
+            logger.error(f"Error querying ClinVar: {str(e)}")
+            return []
+
+    async def _store_variants_in_kg(self, uniprot_id: str, variants: List[Dict[str, Any]]) -> None:
+        """
+        Store variants in knowledge graph for future use
+        """
+        try:
+            for variant in variants:
+                query = """
+                MATCH (p:Protein {uniprot_id: $uniprot_id})
+                MERGE (v:Variant {variant_id: $variant_id})
+                ON CREATE SET 
+                    v.position = $position,
+                    v.original = $original,
+                    v.variant = $variant,
+                    v.effect = $effect,
+                    v.clinical_significance = $clinical_significance,
+                    v.source = $source
+                MERGE (p)-[r:HAS_VARIANT]->(v)
+                """
+                
+                params = {
+                    "uniprot_id": uniprot_id,
+                    "variant_id": variant.get("id"),
+                    "position": variant.get("position"),
+                    "original": variant.get("original"),
+                    "variant": variant.get("variant"),
+                    "effect": variant.get("effect"),
+                    "clinical_significance": variant.get("clinical_significance"),
+                    "source": variant.get("source")
+                }
+                
+                await self.db.run_query(query, params)
+                
+            logger.info(f"Stored {len(variants)} variants in knowledge graph for {uniprot_id}")
+            
+        except Exception as e:
+            logger.error(f"Error storing variants in KG: {str(e)}")
+
+    async def _fetch_uniprot_data(self, protein_id: str) -> Dict[str, Any]:
+        """
+        Fetch protein data from UniProt API
         
         Args:
             protein_id: UniProt ID of the protein
             
         Returns:
-            Dict with structure information including PDB ID or AlphaFold ID
+            Protein data from UniProt or empty dict if not found
         """
-        # Check cache first
-        cached_structure = await self.redis_client.get_cached_structure_data(protein_id)
-        if cached_structure:
-            logger.info(f"Retrieved structure data for {protein_id} from cache")
-            return cached_structure
-        
-        # Initialize structure data
-        structure_data = {
-            "protein_id": protein_id,
-            "status": "unavailable"
-        }
+        logger.info(f"Fetching data from UniProt API for {protein_id}")
         
         try:
-            # First check if we have the protein in our database
-            query = """
-            MATCH (p:Protein {id: $protein_id})
-            OPTIONAL MATCH (p)-[r:HAS_STRUCTURE]->(s:Structure)
-            RETURN p, s
-            """
+            # UniProt's REST API endpoints
+            uniprot_api_url = "https://rest.uniprot.org/uniprotkb"
             
-            result = await self.db.execute_query(query, {"protein_id": protein_id})
-            
-            if result and result.get("s"):
-                structure = result.get("s")
+            async with httpx.AsyncClient() as client:
+                # Query the API
+                response = await client.get(
+                    f"{uniprot_api_url}/{protein_id}",
+                    params={"format": "json"},
+                    timeout=10.0
+                )
                 
-                # Extract structure info from Neo4j
-                if "pdb_id" in structure:
-                    structure_data.update({
-                        "pdb_id": structure.get("pdb_id"),
-                        "method": structure.get("method", "Unknown"),
-                        "resolution": structure.get("resolution"),
-                        "release_date": structure.get("release_date"),
-                        "status": "available",
-                        "type": "experimental",
-                        # Add direct link for visualization
-                        "view_url": f"https://www.rcsb.org/3d-view/{structure.get('pdb_id')}?color=entity"
-                    })
-                elif "alphafold_id" in structure:
-                    structure_data.update({
-                        "alphafold_id": structure.get("alphafold_id"),
-                        "confidence": structure.get("confidence"),
-                        "status": "available", 
-                        "type": "predicted",
-                        # Add direct links for visualization
-                        "view_url": f"https://alphafold.ebi.ac.uk/entry/{structure.get('alphafold_id')}",
-                        "thumbnail_url": f"https://alphafold.ebi.ac.uk/files/AF-{structure.get('alphafold_id')}-F1-predicted_aligned_error_v4.png"
-                    })
-                
-                # Cache and return
-                await self.redis_client.cache_structure_data(protein_id, structure_data)
-                return structure_data
-            
-            # If not in database, query external APIs
-            # First try PDB API
-            pdb_data = await self._query_pdb(protein_id)
-            
-            if pdb_data and "pdb_id" in pdb_data:
-                structure_data.update({
-                    **pdb_data,
-                    "status": "available",
-                    "type": "experimental",
-                    # Add direct link for visualization
-                    "view_url": f"https://www.rcsb.org/3d-view/{pdb_data.get('pdb_id')}?color=entity"
-                })
-                
-                # Cache and return
-                await self.redis_client.cache_structure_data(protein_id, structure_data)
-                return structure_data
-            
-            # If no PDB structure, try AlphaFold
-            alphafold_data = await self._query_alphafold(protein_id)
-            
-            if alphafold_data and "alphafold_id" in alphafold_data:
-                structure_data.update({
-                    **alphafold_data,
-                    "status": "available",
-                    "type": "predicted",
-                    # Add direct links for visualization
-                    "view_url": f"https://alphafold.ebi.ac.uk/entry/{alphafold_data.get('alphafold_id')}",
-                    "thumbnail_url": f"https://alphafold.ebi.ac.uk/files/AF-{alphafold_data.get('alphafold_id')}-F1-predicted_aligned_error_v4.png"
-                })
-                
-                # Cache and return
-                await self.redis_client.cache_structure_data(protein_id, structure_data)
-                return structure_data
-            
-            # If we get here, no structure was found
-            logger.info(f"No structure found for protein {protein_id}")
-            
-            # Cache negative result (but for a shorter time)
-            await self.redis_client.cache_structure_data(protein_id, structure_data, expire=3600*24)  # 1 day
-            return structure_data
-            
-        except Exception as e:
-            logger.error(f"Error retrieving protein structure for {protein_id}: {str(e)}")
-            return structure_data
-    
-    async def get_protein_interactions(self, protein_id: str) -> List[Dict[str, Any]]:
-        """
-        Get protein-protein interactions from STRING-DB API.
-        """
-        # Try to get from graph DB first
-        interactions = await self.db.get_protein_interactions(protein_id)
-        if interactions:
-            logger.info(f"Retrieved interactions for {protein_id} from database, {len(interactions)} found")
-            return interactions
-        
-        # If not in DB, fetch from STRING-db API
-        try:
-            logger.info(f"Fetching protein interactions for {protein_id} from STRING-DB API")
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                # First try to map the UniProt ID to STRING ID
-                string_mapping_url = f"{self.string_db_api_url}/json/get_string_ids?identifiers={protein_id}&species=9606"
-                logger.info(f"Mapping UniProt ID to STRING ID: {string_mapping_url}")
-                
-                mapping_response = await client.get(string_mapping_url)
-                
-                string_id = None
-                if mapping_response.status_code == 200:
-                    mappings = mapping_response.json()
-                    if mappings and len(mappings) > 0:
-                        # Get the first mapping result
-                        string_id = mappings[0].get("stringId")
-                        logger.info(f"Mapped {protein_id} to STRING ID: {string_id}")
-                
-                if not string_id:
-                    # If no mapping found but protein_id looks like a gene symbol, try direct query
-                    if len(protein_id) < 10 and protein_id.isalnum():
-                        string_id = f"9606.{protein_id}"
-                        logger.info(f"Using gene symbol directly: {string_id}")
-                    else:
-                        logger.warning(f"Could not map {protein_id} to STRING ID")
-                        return []
-                
-                # Now get the interactions using the STRING ID
-                interactions_url = f"{self.string_db_api_url}/json/interaction_partners?identifiers={string_id}&limit=30&required_score=0.7"
-                logger.info(f"Getting interactions: {interactions_url}")
-                
-                int_response = await client.get(interactions_url)
-                if int_response.status_code == 200:
-                    raw_interactions = int_response.json()
-                    
-                    # Extract the main protein node for normalization
-                    main_node = None
-                    for item in raw_interactions:
-                        if item.get("stringId_A") == string_id or item.get("preferredName_A", "").upper() == protein_id.upper():
-                            main_node = {
-                                "string_id": string_id,
-                                "name": item.get("preferredName_A", protein_id)
-                            }
-                            break
-                    
-                    if not main_node:
-                        logger.warning(f"Could not identify main protein node for {protein_id}")
-                        return []
-                    
-                    # Transform the data into our format
-                    formatted_interactions = []
-                    seen_proteins = set()
-                    
-                    for item in raw_interactions:
-                        # Only include interactions with the main protein
-                        if item.get("stringId_A") == string_id:
-                            partner_id = item.get("stringId_B")
-                            partner_name = item.get("preferredName_B")
-                            
-                            # Skip if we've already seen this protein
-                            if partner_id in seen_proteins:
-                                continue
-                            seen_proteins.add(partner_id)
-                            
-                            # Create a normalized ID that includes original protein
-                            interaction_data = {
-                                "protein_id": f"{partner_id}",
-                                "protein_name": partner_name,
-                                "description": f"Interaction with {main_node['name']}",
-                                "score": item.get("score", 0) / 1000.0  # STRING scores are 0-1000, normalize to 0-1
-                            }
-                            formatted_interactions.append(interaction_data)
-                    
-                    logger.info(f"Found {len(formatted_interactions)} interactions for {protein_id}")
-                    return formatted_interactions
-        
-        except Exception as e:
-            logger.error(f"Error fetching protein interactions for {protein_id}: {str(e)}")
-            return []
-        
-        return []
-    
-    async def get_disease_associations(self, protein_id: str) -> List[Dict[str, Any]]:
-        """
-        Get diseases associated with a protein.
-        """
-        # Try to get from graph DB first
-        diseases = await self.db.get_protein_diseases(protein_id)
-        if diseases:
-            return diseases
-        
-        # If not in DB, we would call an external API
-        # For demonstration, we'll return mock data
-        if protein_id == "P04637":  # TP53
-            return [
-                {
-                    "disease_id": "MONDO:0007254",
-                    "name": "Li-Fraumeni syndrome",
-                    "description": "A rare, autosomal dominant cancer predisposition syndrome characterized by early-onset of multiple primary cancers.",
-                    "evidence": "numerous studies"
-                },
-                {
-                    "disease_id": "DOID:1793",
-                    "name": "Pancreatic cancer",
-                    "description": "An aggressive malignancy arising from pancreatic cells with poor prognosis.",
-                    "evidence": "strong"
-                }
-            ]
-        elif protein_id == "P38398":  # BRCA1
-            return [
-                {
-                    "disease_id": "DOID:1612",
-                    "name": "Breast cancer",
-                    "description": "A common malignancy that arises from breast epithelial tissue.",
-                    "evidence": "strong"
-                }
-            ]
-        
-        return []
-    
-    async def get_drug_interactions(self, protein_id: str) -> List[Dict[str, Any]]:
-        """
-        Get drugs that target a protein.
-        """
-        # Try to get from graph DB first
-        drugs = await self.db.get_protein_drugs(protein_id)
-        if drugs:
-            return drugs
-        
-        # If not in DB, we would call an external API
-        # For demonstration, we'll return mock data
-        if protein_id == "P38398":  # BRCA1
-            return [
-                {
-                    "drug_id": "DB00398",
-                    "name": "Olaparib",
-                    "description": "PARP inhibitor used for the treatment of BRCA-mutated advanced ovarian cancer",
-                    "mechanism": "PARP inhibitor"
-                },
-                {
-                    "drug_id": "DB11748",
-                    "name": "Rucaparib",
-                    "description": "PARP inhibitor used for the treatment of ovarian cancer",
-                    "mechanism": "PARP inhibitor"
-                }
-            ]
-        
-        return []
-    
-    async def get_protein_variants(self, protein_id: str) -> List[Dict[str, Any]]:
-        """
-        Get variants of a protein.
-        """
-        # Try to get from graph DB first
-        variants = await self.db.get_protein_variants(protein_id)
-        if variants:
-            return variants
-        
-        # If not in DB, we would call an external API
-        # For demonstration, we'll return mock data
-        if protein_id == "P04637":  # TP53
-            return [
-                {
-                    "variant_id": "P04637_R175H",
-                    "name": "TP53 R175H",
-                    "type": "missense",
-                    "location": 175,
-                    "original_residue": "R",
-                    "variant_residue": "H",
-                    "effect": "Loss of function",
-                    "clinical_significance": "pathogenic"
-                }
-            ]
-        elif protein_id == "P38398":  # BRCA1
-            return [
-                {
-                    "variant_id": "P38398_R1443X",
-                    "name": "BRCA1 R1443X",
-                    "type": "nonsense",
-                    "location": 1443,
-                    "original_residue": "R",
-                    "variant_residue": "X",
-                    "effect": "Loss of function",
-                    "clinical_significance": "pathogenic"
-                }
-            ]
-        
-        return []
-    
-    # Private helper methods
-    
-    async def _fetch_uniprot_data(self, protein_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Fetch protein data from UniProt API.
-        """
-        try:
-            logger.info(f"Fetching protein data for {protein_id} from UniProt API")
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                # First check if the ID is a valid UniProt ID
-                direct_url = f"{self.uniprot_api_url}/{protein_id}"
-                logger.info(f"Trying direct UniProt lookup: {direct_url}")
-                
-                response = await client.get(direct_url)
-                
-                # If direct lookup fails, try searching by the ID
                 if response.status_code != 200:
-                    logger.info(f"Direct lookup failed, trying search for {protein_id}")
-                    search_url = f"{self.uniprot_api_url}/search?query={protein_id}&format=json"
-                    search_response = await client.get(search_url)
+                    logger.warning(f"UniProt API returned status code {response.status_code}")
+                    return {}
                     
-                    if search_response.status_code != 200:
-                        logger.warning(f"UniProt search failed for {protein_id}")
-                        return None
-                    
-                    search_data = search_response.json()
-                    results = search_data.get("results", [])
-                    
-                    if not results or len(results) == 0:
-                        logger.warning(f"No UniProt results for {protein_id}")
-                        return None
-                    
-                    # Use the first (best match) result ID
-                    uniprot_id = results[0].get("primaryAccession")
-                    if not uniprot_id:
-                        logger.warning(f"No primary accession in UniProt result for {protein_id}")
-                        return None
-                    
-                    # Fetch details for the matched ID
-                    logger.info(f"Found UniProt ID {uniprot_id}, fetching details")
-                    detail_url = f"{self.uniprot_api_url}/{uniprot_id}"
-                    response = await client.get(detail_url)
-                    
-                    if response.status_code != 200:
-                        logger.warning(f"Failed to get details for UniProt ID {uniprot_id}")
-                        return None
+                data = response.json()
                 
-                # Process the UniProt data
-                uniprot_data = response.json()
-                
-                # Extract key information from the UniProt response
+                # Extract relevant information
                 protein_data = {
-                    "id": uniprot_data.get("primaryAccession", protein_id),
-                    "name": uniprot_data.get("gene", [{"geneName": {"value": protein_id}}])[0].get("geneName", {}).get("value", protein_id),
-                    "full_name": uniprot_data.get("proteinDescription", {}).get("recommendedName", {}).get("fullName", {}).get("value", ""),
+                    "id": protein_id,
+                    "name": data.get("gene", [{}])[0].get("name", {}).get("value", protein_id),
+                    "full_name": data.get("protein", {}).get("recommendedName", {}).get("fullName", {}).get("value", ""),
                     "function": "",
                     "description": "",
-                    "sequence": uniprot_data.get("sequence", {}).get("value", "")
+                    "sequence": data.get("sequence", {}).get("value", "")
                 }
                 
                 # Extract function and description from comments
-                for comment in uniprot_data.get("comments", []):
+                for comment in data.get("comments", []):
                     if comment.get("commentType") == "FUNCTION":
                         protein_data["function"] = comment.get("texts", [{}])[0].get("value", "")
-                    elif comment.get("commentType") == "CATALYTIC ACTIVITY":
-                        if not protein_data["function"]:
-                            protein_data["function"] = comment.get("reaction", {}).get("name", "")
+                    
+                # Set description from protein existence
+                protein_data["description"] = data.get("proteinDescription", {}).get("recommendedName", {}).get("fullName", {}).get("value", "")
                 
-                # If we still don't have a description, use other fields
-                if not protein_data["description"]:
-                    for comment in uniprot_data.get("comments", []):
-                        if comment.get("commentType") == "FUNCTION" or comment.get("commentType") == "DOMAIN":
-                            protein_data["description"] = comment.get("texts", [{}])[0].get("value", "")
-                            break
+                # Get taxonomy information
+                organism = data.get("organism", {}).get("scientificName", "")
+                if organism:
+                    protein_data["organism"] = organism
+                    
+                # Get sequence length
+                protein_data["length"] = data.get("sequence", {}).get("length", 0)
                 
-                logger.info(f"Successfully retrieved UniProt data for {protein_id}")
                 return protein_data
                 
         except Exception as e:
-            logger.error(f"Error fetching UniProt data for {protein_id}: {str(e)}")
-            return None
+            logger.error(f"Error fetching UniProt data: {str(e)}")
+            return {}

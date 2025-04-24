@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     
     # External API endpoints
     UNIPROT_API_URL: str = os.getenv("UNIPROT_API_URL", "https://rest.uniprot.org/uniprotkb")
-    PDB_API_URL: str = os.getenv("PDB_API_URL", "https://data.rcsb.org/rest/v1")
+    PDB_API_URL: str = os.getenv("PDB_API_URL", "https://data.rcsb.org")
     STRING_DB_API_URL: str = os.getenv("STRING_DB_API_URL", "https://string-db.org/api")
     DISGENET_API_URL: str = os.getenv("DISGENET_API_URL", "https://www.disgenet.org/api")
     CHEMBL_API_URL: str = os.getenv("CHEMBL_API_URL", "https://www.ebi.ac.uk/chembl/api/data")
