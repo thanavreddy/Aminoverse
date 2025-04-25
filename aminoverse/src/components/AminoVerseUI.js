@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import apiService from '../services/api';
 import statusChecker from '../services/statusChecker';
 import { v4 as uuidv4 } from 'uuid'; // For generating unique session IDs
@@ -480,7 +480,7 @@ const ProteinStructureVisualizer = ({ proteinId, structureData }) => {
   );
 };
 
-// KnowledgeGraphVisualizer component for the knowledge graph visualization
+// KnowledgeGraphVisualizer component with fixed initialization and cleanup
 const KnowledgeGraphVisualizer = ({ graphData, entityId, entityType = "Protein" }) => {
   const [visualState, setVisualState] = useState({
     loading: true,
@@ -496,7 +496,14 @@ const KnowledgeGraphVisualizer = ({ graphData, entityId, entityType = "Protein" 
   // Track if component is mounted to prevent state updates after unmounting
   const isMounted = useRef(true);
   useEffect(() => {
-    return () => { isMounted.current = false; };
+    return () => { 
+      isMounted.current = false; 
+      // Clean up Cytoscape instance on unmount to prevent memory leaks
+      if (cyRef.current) {
+        cyRef.current.destroy();
+        cyRef.current = null;
+      }
+    };
   }, []);
 
   // Log the knowledge graph data received
@@ -584,7 +591,7 @@ const KnowledgeGraphVisualizer = ({ graphData, entityId, entityType = "Protein" 
 
         return {
           data: {
-            id: edge.id,
+            id: edge.id || `edge-${edge.source}-${edge.target}`, // Ensure all edges have unique IDs
             source: edge.source,
             target: edge.target,
             type: edge.type || 'unknown',
@@ -598,6 +605,14 @@ const KnowledgeGraphVisualizer = ({ graphData, entityId, entityType = "Protein" 
       if (isMounted.current) {
         setVisualState(prev => ({ ...prev, loading: false, error: null }));
       }
+      
+      // Check for duplicate IDs which can cause Cytoscape errors
+      const allIds = [...cyNodes.map(n => n.data.id), ...cyEdges.map(e => e.data.id)];
+      const duplicates = allIds.filter((id, index) => allIds.indexOf(id) !== index);
+      if (duplicates.length > 0) {
+        console.warn(`Duplicate IDs in graph elements: ${duplicates.join(', ')}`);
+      }
+      
       return [...cyNodes, ...cyEdges];
     } catch (err) {
       console.error("Error processing knowledge graph data:", err);
@@ -634,9 +649,7 @@ const KnowledgeGraphVisualizer = ({ graphData, entityId, entityType = "Protein" 
         'z-index': 10,
         'border-width': 1,
         'border-color': '#ffffff',
-        'border-opacity': 0.8,
-        'transition-property': 'background-color, border-color, border-width',
-        'transition-duration': '0.3s'
+        'border-opacity': 0.8
       }
     },
     // Special styling for the main entity node
@@ -646,14 +659,13 @@ const KnowledgeGraphVisualizer = ({ graphData, entityId, entityType = "Protein" 
         'border-width': 3,
         'border-color': '#2563EB', // blue-600
         'font-weight': 'bold',
-        'font-size': '12px',
+        'font-size': 12,
         'z-index': 20,
         'text-outline-width': 3,
         'text-background-opacity': 0.7,
         'text-background-color': '#ffffff',
         'text-background-padding': '2px',
-        'text-border-opacity': 0.7,
-        'box-shadow': '0 0 4px 2px rgba(59, 130, 246, 0.5)' // Subtle glow effect
+        'text-border-opacity': 0.7
       }
     },
     // Edge styling with improved visibility
@@ -665,38 +677,25 @@ const KnowledgeGraphVisualizer = ({ graphData, entityId, entityType = "Protein" 
         'target-arrow-color': 'data(color)',
         'target-arrow-shape': 'triangle',
         'curve-style': 'bezier',
-        'opacity': 0.7,
-        'transition-property': 'opacity, width, line-color',
-        'transition-duration': '0.3s'
+        'opacity': 0.7
       }
     },
-    // Hover states with smooth transitions
+    // Hover states
     {
       selector: 'node.hover',
       style: {
         'border-width': 3,
         'border-color': '#2563EB', // blue-600
         'border-opacity': 1,
-        'background-color': function(ele) {
-          return ele.data('color');
-        },
         'background-opacity': 1,
-        'z-index': 30,
-        'overlay-opacity': 0.2,
-        'overlay-color': '#ffffff'
+        'z-index': 30
       }
     },
     {
       selector: 'edge.hover',
       style: {
-        'width': function(ele) {
-          return ele.data('width') * 1.5;
-        },
         'opacity': 1,
-        'z-index': 30,
-        'line-color': function(ele) {
-          return ele.data('color');
-        }
+        'z-index': 30
       }
     },
     // Selected node style
@@ -706,7 +705,6 @@ const KnowledgeGraphVisualizer = ({ graphData, entityId, entityType = "Protein" 
         'border-width': 4,
         'border-color': '#EA580C', // orange-600
         'border-opacity': 1,
-        'box-shadow': '0 0 6px 3px rgba(234, 88, 12, 0.5)',
         'z-index': 999
       }
     },
@@ -716,7 +714,7 @@ const KnowledgeGraphVisualizer = ({ graphData, entityId, entityType = "Protein" 
       style: {
         'opacity': 1,
         'width': function(ele) {
-          return ele.data('width') * 1.5;
+          return Number(ele.data('width')) * 1.5;
         },
         'z-index': 20
       }
@@ -726,7 +724,7 @@ const KnowledgeGraphVisualizer = ({ graphData, entityId, entityType = "Protein" 
   // Initialize and apply layout when elements or container dimensions change
   useEffect(() => {
     // Skip if conditions aren't met
-    if (!cyRef.current || elements.length === 0 || visualState.error) {
+    if (!containerRef.current || elements.length === 0 || visualState.error) {
       return;
     }
 
@@ -742,24 +740,38 @@ const KnowledgeGraphVisualizer = ({ graphData, entityId, entityType = "Protein" 
         return;
       }
 
-      const cy = cyRef.current;
-      console.log(`Initializing knowledge graph with ${elements.length} elements`);
-      
-      // Clean up before adding new elements
-      cy.elements().remove();
-      cy.add(elements);
-
       try {
-        // Choose an appropriate layout based on graph size
+        // Create a new Cytoscape instance instead of re-using an existing one
+        // This helps avoid the "Cannot read properties of null (reading 'notify')" error
+        if (cyRef.current) {
+          cyRef.current.destroy(); // Clean up existing instance if any
+        }
+        
+        cyRef.current = Cytoscape({
+          container: containerRef.current,
+          elements: elements,
+          style: stylesheet,
+          layout: { name: 'preset' }, // Initially use preset layout, will apply real layout below
+          wheelSensitivity: 0.3,
+          minZoom: 0.1,
+          maxZoom: 2,
+          boxSelectionEnabled: false
+        });
+        
+        const cy = cyRef.current;
+        console.log(`Initializing knowledge graph with ${elements.length} elements`);
+        
+        // Choose appropriate layout based on graph size
         const layoutName = elements.length <= 20 ? 'concentric' : 'cose';
         const layoutOptions = elements.length <= 20 ? {
           name: 'concentric',
           fit: true,
           padding: 50,
           avoidOverlap: true,
+          startAngle: 3/2 * Math.PI,
           minNodeSpacing: 50,
           concentric: function(node) {
-            // Central entity in the middle
+            // Central node (main protein) in the middle
             if (node.data('centrality') === 1) return 10;
             
             // Group by node type
@@ -776,7 +788,7 @@ const KnowledgeGraphVisualizer = ({ graphData, entityId, entityType = "Protein" 
           name: 'cose',
           fit: true,
           padding: 50,
-          nodeRepulsion: 800000,
+          nodeRepulsion: 8000,
           nodeOverlap: 10,
           idealEdgeLength: 100,
           edgeElasticity: 100,
@@ -786,136 +798,108 @@ const KnowledgeGraphVisualizer = ({ graphData, entityId, entityType = "Protein" 
           initialTemp: 200,
           coolingFactor: 0.95,
           minTemp: 1.0,
-          animate: true,
-          animationDuration: 800
+          animate: 'end' // Change to 'end' instead of true to avoid animation issues
         };
         
         // Apply the layout with animation
         const layout = cy.layout(layoutOptions);
-        layout.run();
         
-        // Center and fit the graph in the container
-        cy.center();
-        cy.fit(undefined, 40);
+        // Add event handlers for interaction before running the layout
+        cy.on('mouseover', 'node', function(event) {
+          const node = event.target;
+          node.addClass('hover');
+          node.connectedEdges().addClass('hover');
+          setHoveredNode(node.data());
+        });
         
-        // Mark as initialized
-        if (isMounted.current) {
-          setVisualState(prev => ({ ...prev, initialized: true }));
-        }
+        cy.on('mouseout', 'node', function(event) {
+          const node = event.target;
+          node.removeClass('hover');
+          node.connectedEdges().removeClass('hover');
+          setHoveredNode(null);
+        });
         
-        console.log("Knowledge graph layout applied successfully");
-      } catch (err) {
-        console.error("Error applying knowledge graph layout:", err);
+        cy.on('tap', 'node', function(event) {
+          const node = event.target;
+          cy.nodes().removeClass('selected');
+          cy.edges().removeClass('connected');
+          node.addClass('selected');
+          node.connectedEdges().addClass('connected');
+          setSelectedNode(node.data());
+        });
         
-        // Try a simple circle layout as fallback
+        cy.on('tap', function(event) {
+          if (event.target === cy) {
+            cy.nodes().removeClass('selected');
+            cy.edges().removeClass('connected');
+            setSelectedNode(null);
+          }
+        });
+        
+        // Add a ready handler to fit the graph after layout completes
+        layout.one('layoutstop', () => {
+          if (isMounted.current) {
+            cy.center();
+            cy.fit(undefined, 40);
+            setVisualState(prev => ({ ...prev, initialized: true }));
+            console.log("Knowledge graph layout complete");
+          }
+        });
+        
+        // Start the layout process
         try {
-          const fallbackLayout = cy.layout({ 
-            name: 'circle',
-            animate: false
-          });
-          fallbackLayout.run();
-          cy.center();
-          cy.fit();
-          
+          layout.run();
+        } catch (layoutError) {
+          console.error("Layout error:", layoutError);
+          // Try a simple circle layout as fallback
+          cy.layout({ name: 'circle', fit: true }).run();
           if (isMounted.current) {
             setVisualState(prev => ({ ...prev, initialized: true }));
           }
-        } catch (fallbackErr) {
-          console.error("Fallback layout also failed:", fallbackErr);
+        }
+      } catch (err) {
+        console.error("Error initializing knowledge graph:", err);
+        if (isMounted.current) {
+          setVisualState(prev => ({ 
+            ...prev, 
+            error: `Error initializing graph visualization: ${err.message}` 
+          }));
         }
       }
     };
 
     // Start initialization process
     initializeGraph();
-  }, [elements, visualState.loading]);
-  
-  // Add event handlers for interaction (hover, click)
-  useEffect(() => {
-    if (!cyRef.current) return;
     
-    const cy = cyRef.current;
-    
-    // Hover events for nodes
-    const onNodeMouseOver = (event) => {
-      const node = event.target;
-      node.addClass('hover');
-      
-      // Also highlight connected edges
-      node.connectedEdges().addClass('hover');
-      
-      // Update hover state
-      setHoveredNode(node.data());
-    };
-    
-    const onNodeMouseOut = (event) => {
-      const node = event.target;
-      node.removeClass('hover');
-      
-      // Remove highlight from edges
-      node.connectedEdges().removeClass('hover');
-      
-      // Clear hover state
-      setHoveredNode(null);
-    };
-    
-    // Click event for nodes
-    const onNodeClick = (event) => {
-      const node = event.target;
-      
-      // Clear previous selection
-      cy.nodes().removeClass('selected');
-      cy.edges().removeClass('connected');
-      
-      // Set new selection
-      node.addClass('selected');
-      
-      // Highlight connected edges
-      node.connectedEdges().addClass('connected');
-      
-      // Set selected node data for the info panel
-      setSelectedNode(node.data());
-    };
-    
-    // Background click to deselect
-    const onBackgroundClick = () => {
-      cy.nodes().removeClass('selected');
-      cy.edges().removeClass('connected');
-      setSelectedNode(null);
-    };
-    
-    // Register event listeners
-    cy.on('mouseover', 'node', onNodeMouseOver);
-    cy.on('mouseout', 'node', onNodeMouseOut);
-    cy.on('tap', 'node', onNodeClick);
-    cy.on('tap', function(event) {
-      if (event.target === cy) {
-        onBackgroundClick();
-      }
-    });
-    
-    // Cleanup on unmount
+    // Clean up on unmount or when elements change
     return () => {
-      cy.removeListener('mouseover', 'node', onNodeMouseOver);
-      cy.removeListener('mouseout', 'node', onNodeMouseOut);
-      cy.removeListener('tap', 'node', onNodeClick);
-      cy.removeListener('tap');
+      if (cyRef.current) {
+        try {
+          cyRef.current.removeAllListeners();
+        } catch (err) {
+          console.warn("Error removing listeners:", err);
+        }
+      }
     };
-  }, []);
+  }, [elements, visualState.loading]);
   
   // Fix layout when container size changes
   useEffect(() => {
     const handleResize = () => {
       if (cyRef.current && elements.length && containerRef.current) {
-        cyRef.current.resize();
-        cyRef.current.center();
-        cyRef.current.fit(undefined, 40);
+        try {
+          cyRef.current.resize();
+          cyRef.current.center();
+          cyRef.current.fit(undefined, 40);
+        } catch (err) {
+          console.warn("Error during resize:", err);
+        }
       }
     };
     
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
-  }, [elements]);
+  }, [elements.length]);
 
   // No entity ID provided
   if (!entityId) {
@@ -960,13 +944,16 @@ const KnowledgeGraphVisualizer = ({ graphData, entityId, entityType = "Protein" 
           <button 
             onClick={() => {
               setVisualState(prev => ({...prev, loading: true, error: null}));
-              // This will trigger the useEffect to try reinitializing
               setTimeout(() => {
                 if (cyRef.current) {
-                  const layout = cyRef.current.layout({ name: 'cose' });
-                  layout.run();
+                  try {
+                    cyRef.current.destroy();
+                    cyRef.current = null;
+                  } catch (err) {
+                    console.warn("Error cleaning up before retry:", err);
+                  }
                 }
-              }, 500);
+              }, 100);
             }}
             className="px-4 py-2 bg-blue-500 text-white rounded-md hover:bg-blue-600 transition-colors"
           >
@@ -1065,24 +1052,11 @@ const KnowledgeGraphVisualizer = ({ graphData, entityId, entityType = "Protein" 
         {/* Graph container */}
         <div className="flex-1 relative">
           <div ref={containerRef} className="h-full w-full">
-            <CytoscapeComponent
-              elements={elements}
-              stylesheet={stylesheet}
-              style={{ width: '100%', height: '100%' }} // Explicit dimensions
-              layout={{ name: 'preset' }} // Initial layout, real layout applied in useEffect
-              cy={(cy) => {
-                cyRef.current = cy;
-              }}
-              className="h-full w-full"
-              minZoom={0.15}
-              maxZoom={3}
-              wheelSensitivity={0.3}
-              boxSelectionEnabled={false}
-            />
+            {/* The Cytoscape component is now initialized in the useEffect hook instead */}
             
             {/* Loading overlay while the graph is rendering */}
             {!visualState.initialized && (
-              <div className="absolute inset-0 flex items-center justify-center bg-white bg-opacity-75">
+              <div className="absolute inset-0 flex items-center justify-center bg-white bg-opacity-75 z-10">
                 <div className="flex flex-col items-center">
                   <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-600"></div>
                   <p className="mt-4 text-blue-800 font-medium">Generating graph visualization...</p>
@@ -1211,7 +1185,11 @@ const KnowledgeGraphVisualizer = ({ graphData, entityId, entityType = "Protein" 
           <button
             onClick={() => {
               if (cyRef.current) {
-                cyRef.current.fit(undefined, 40);
+                try {
+                  cyRef.current.fit(undefined, 40);
+                } catch (err) {
+                  console.warn("Error during fit:", err);
+                }
               }
             }}
             className="px-2 py-1 bg-blue-100 hover:bg-blue-200 text-blue-700 rounded-md text-xs flex items-center transition-colors"
@@ -1225,7 +1203,11 @@ const KnowledgeGraphVisualizer = ({ graphData, entityId, entityType = "Protein" 
           <button
             onClick={() => {
               if (cyRef.current) {
-                cyRef.current.zoom(cyRef.current.zoom() * 1.5);
+                try {
+                  cyRef.current.zoom(cyRef.current.zoom() * 1.5);
+                } catch (err) {
+                  console.warn("Error during zoom in:", err);
+                }
               }
             }}
             className="w-6 h-6 bg-blue-100 hover:bg-blue-200 text-blue-700 rounded-md text-xs flex items-center justify-center transition-colors"
@@ -1236,7 +1218,11 @@ const KnowledgeGraphVisualizer = ({ graphData, entityId, entityType = "Protein" 
           <button
             onClick={() => {
               if (cyRef.current) {
-                cyRef.current.zoom(cyRef.current.zoom() / 1.5);
+                try {
+                  cyRef.current.zoom(cyRef.current.zoom() / 1.5);
+                } catch (err) {
+                  console.warn("Error during zoom out:", err);
+                }
               }
             }}
             className="w-6 h-6 bg-blue-100 hover:bg-blue-200 text-blue-700 rounded-md text-xs flex items-center justify-center transition-colors"
@@ -1247,19 +1233,33 @@ const KnowledgeGraphVisualizer = ({ graphData, entityId, entityType = "Protein" 
           <button
             onClick={() => {
               if (cyRef.current) {
-                // Reset everything to initial state
-                cyRef.current.elements().removeClass('selected hover');
-                cyRef.current.fit(undefined, 40);
-                setSelectedNode(null);
-                setHoveredNode(null);
-                
-                // Re-apply the layout
-                const layout = cyRef.current.layout({
-                  name: elements.length <= 20 ? 'concentric' : 'cose',
-                  animate: true,
-                  animationDuration: 800
-                });
-                layout.run();
+                try {
+                  // Reset everything to initial state
+                  cyRef.current.elements().removeClass('selected hover');
+                  
+                  // Set the new layout
+                  const layout = cyRef.current.layout({
+                    name: elements.length <= 20 ? 'concentric' : 'cose',
+                    animate: 'end',
+                    animationDuration: 500,
+                    // Add proper concentric options if that layout is used
+                    concentric: elements.length <= 20 ? function(node) {
+                      return node.data('centrality') === 1 ? 10 : 
+                             (node.data('type') === 'protein' ? 8 : 
+                              (node.data('type') === 'disease' ? 6 : 4));
+                    } : undefined,
+                    levelWidth: elements.length <= 20 ? function() { return 1; } : undefined
+                  });
+                  
+                  // Run the layout and fit afterward
+                  layout.run();
+                  
+                  // Reset UI state
+                  setSelectedNode(null);
+                  setHoveredNode(null);
+                } catch (err) {
+                  console.warn("Error during reset:", err);
+                }
               }
             }}
             className="px-2 py-1 bg-blue-100 hover:bg-blue-200 text-blue-700 rounded-md text-xs flex items-center transition-colors"
@@ -1269,6 +1269,475 @@ const KnowledgeGraphVisualizer = ({ graphData, entityId, entityType = "Protein" 
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
             </svg>
             Reset
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Define the InteractionNetworkVisualizer component that was missing
+const InteractionNetworkVisualizer = ({ interactions, proteinId }) => {
+  const containerRef = useRef(null);
+  const cyRef = useRef(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [selectedNode, setSelectedNode] = useState(null);
+  const [nodeCount, setNodeCount] = useState(0);
+
+  // Log the interactions received for debugging
+  useEffect(() => {
+    console.log(`InteractionNetworkVisualizer - Received ${interactions?.length || 0} interactions for ${proteinId}`);
+    
+    if (proteinId && interactions && interactions.length > 0) {
+      setIsLoading(false);
+    } else if (proteinId && (!interactions || interactions.length === 0)) {
+      // No interactions data yet
+      console.log("No interaction data available yet for:", proteinId);
+    }
+  }, [interactions, proteinId]);
+
+  // Prepare elements for Cytoscape from interactions data
+  const elements = useMemo(() => {
+    if (!interactions || !proteinId) return [];
+    
+    try {
+      const nodes = [];
+      const edges = [];
+      
+      // Add the central node (the protein being visualized)
+      nodes.push({
+        data: {
+          id: proteinId,
+          label: proteinId,
+          type: 'main',
+          score: 1.0
+        }
+      });
+      
+      // Add nodes and edges for each interaction
+      interactions.forEach((interaction, index) => {
+        const interactorId = interaction.protein_id || `interactor-${index}`;
+        
+        // Add the interactor node if it doesn't exist yet
+        if (!nodes.find(node => node.data.id === interactorId)) {
+          nodes.push({
+            data: {
+              id: interactorId,
+              label: interaction.protein_name || interactorId,
+              type: 'interactor',
+              score: interaction.score || 0.5,
+              evidence: interaction.evidence || '',
+              is_llm_generated: interaction.is_llm_generated || false
+            }
+          });
+        }
+        
+        // Add the edge between main protein and interactor
+        edges.push({
+          data: {
+            id: `e-${proteinId}-${interactorId}`,
+            source: proteinId,
+            target: interactorId,
+            weight: interaction.score || 0.5
+          }
+        });
+      });
+      
+      // Update the node count
+      setNodeCount(nodes.length);
+      
+      return [...nodes, ...edges];
+    } catch (err) {
+      console.error("Error processing interaction data:", err);
+      return [];
+    }
+  }, [interactions, proteinId]);
+
+  // Define the visual style for the network
+  const stylesheet = [
+    // Style for all nodes
+    {
+      selector: 'node',
+      style: {
+        'label': 'data(label)',
+        'color': '#333',
+        'font-size': '10px',
+        'text-valign': 'center',
+        'text-halign': 'center',
+        'background-color': '#CFE2FF', // Light blue
+        'text-outline-width': 2,
+        'text-outline-color': '#fff',
+        'text-outline-opacity': 0.8,
+        'text-wrap': 'wrap',
+        'text-max-width': '80px',
+        'width': 'mapData(score, 0, 1, 20, 40)',
+        'height': 'mapData(score, 0, 1, 20, 40)',
+        'border-width': 1,
+        'border-color': '#93B4DB',
+      }
+    },
+    // Special style for the main protein node
+    {
+      selector: 'node[type = "main"]',
+      style: {
+        'background-color': '#3B82F6', // Blue-500
+        'width': 50,
+        'height': 50,
+        'font-size': '12px',
+        'font-weight': 'bold',
+        'border-width': 2,
+        'border-color': '#2563EB', // Blue-600
+        'text-outline-width': 3,
+      }
+    },
+    // Style for nodes generated by LLM
+    {
+      selector: 'node[is_llm_generated = true]',
+      style: {
+        'background-color': '#FDE68A', // Amber-200
+        'border-color': '#F59E0B', // Amber-500
+        'border-width': 1,
+        'border-style': 'dashed'
+      }
+    },
+    // Style for edges
+    {
+      selector: 'edge',
+      style: {
+        'width': 'mapData(weight, 0, 1, 1, 5)',
+        'line-color': '#CBD5E1', // Slate-300
+        'target-arrow-color': '#CBD5E1',
+        'target-arrow-shape': 'triangle',
+        'curve-style': 'bezier',
+        'opacity': 0.7
+      }
+    },
+    // Hover styles
+    {
+      selector: 'node:hover',
+      style: {
+        'background-color': '#93C5FD', // Blue-300
+        'border-color': '#2563EB', // Blue-600
+        'border-width': 2,
+        'transition-property': 'background-color, border-color, border-width',
+        'transition-duration': '0.2s'
+      }
+    },
+    // Selected node style
+    {
+      selector: 'node:selected',
+      style: {
+        'background-color': '#3B82F6', // Blue-500
+        'border-color': '#1D4ED8', // Blue-700
+        'border-width': 3
+      }
+    },
+    // Selected edge style
+    {
+      selector: 'edge:selected',
+      style: {
+        'line-color': '#3B82F6', // Blue-500
+        'target-arrow-color': '#3B82F6',
+        'width': 'mapData(weight, 0, 1, 2, 6)',
+        'opacity': 1
+      }
+    }
+  ];
+
+  // Initialize and layout the network graph
+  useEffect(() => {
+    if (!cyRef.current || !containerRef.current || elements.length === 0) {
+      return;
+    }
+    
+    const cy = cyRef.current;
+    
+    // Clear existing elements
+    cy.elements().remove();
+    
+    // Add new elements
+    cy.add(elements);
+    
+    // Choose appropriate layout based on number of nodes
+    const layoutOptions = elements.length <= 25 ? {
+      name: 'concentric',
+      fit: true,
+      padding: 70, // Increased from 50
+      avoidOverlap: true, // Ensure nodes don't overlap
+      spacingFactor: 1.85, // Increased from 1.5 - more spacing between nodes
+      minNodeSpacing: 120, // Increased from 80 - minimum distance between nodes
+      concentric: function(node) {
+        // Central node (main protein) in the center
+        return node.data('type') === 'main' ? 2 : 1;
+      },
+      levelWidth: function() { return 1; },
+      animate: true,
+      animationDuration: 500
+    } : {
+      name: 'cose',
+      fit: true,
+      padding: 80, // Increased from 50
+      randomize: false, // More deterministic layout
+      nodeRepulsion: 18000, // Increased from 12000 - nodes push each other away stronger
+      nodeOverlap: 60, // Increased from 40 - how much to avoid node overlap
+      idealEdgeLength: 200, // Increased from 150 - longer ideal edge length
+      edgeElasticity: 100,
+      nestingFactor: 1.2,
+      gravity: 80,
+      numIter: 2000, // Increased from 1500 - more iterations for better layout
+      initialTemp: 200,
+      coolingFactor: 0.95,
+      minTemp: 1.0,
+      animate: true,
+      animationDuration: 800
+    };
+    
+    // Apply the layout
+    const layout = cy.layout(layoutOptions);
+    layout.run();
+    
+    // Center and fit the graph
+    cy.center();
+    cy.fit();
+    
+    // Event handlers for interaction
+    cy.on('tap', 'node', function(evt) {
+      const node = evt.target;
+      setSelectedNode(node.data());
+    });
+    
+    cy.on('tap', function(evt) {
+      if (evt.target === cy) {
+        setSelectedNode(null);
+      }
+    });
+    
+    // Cleanup
+    return () => {
+      cy.removeAllListeners();
+    };
+  }, [elements]);
+
+  // Adjust layout when window resizes
+  useEffect(() => {
+    const handleResize = () => {
+      if (cyRef.current) {
+        cyRef.current.resize();
+        cyRef.current.fit();
+      }
+    };
+    
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  // When no protein ID is provided
+  if (!proteinId) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full border border-gray-200 rounded-md p-8 text-center">
+        <svg xmlns="http://www.w3.org/2000/svg" className="h-16 w-16 text-gray-300 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M17 15l-5 5-5-5m10-7l-5 5-5-5" />
+        </svg>
+        <p className="text-gray-500">Select a protein to view its interaction network</p>
+      </div>
+    );
+  }
+
+  // Loading state
+  if (isLoading) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full p-8">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
+        <p className="text-gray-500 mt-4 font-medium">Loading interaction data...</p>
+        <p className="text-gray-400 mt-2 text-sm">Generating network for {proteinId}</p>
+      </div>
+    );
+  }
+
+  // No interactions found
+  if (!interactions || interactions.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full p-8 text-center">
+        <div className="mb-4">
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-16 w-16 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M12 14h.01" />
+          </svg>
+        </div>
+        <p className="text-gray-700 font-medium">No interaction data found</p>
+        <p className="text-sm text-gray-500 mt-2 max-w-md">
+          No protein-protein interactions found for {proteinId}.
+        </p>
+      </div>
+    );
+  }
+
+  // Render the interaction network
+  return (
+    <div className="h-full relative border border-gray-200 rounded-md flex flex-col">
+      {/* Header with statistics */}
+      <div className="p-2 border-b border-gray-200 flex justify-between items-center bg-gray-50">
+        <div className="text-sm">
+          <span className="font-medium text-gray-700">{proteinId} Interaction Network</span>
+          <span className="ml-2 px-2 py-0.5 bg-blue-100 text-blue-800 text-xs rounded-full">
+            {nodeCount} proteins
+          </span>
+        </div>
+      </div>
+      
+      {/* Main network visualization */}
+      <div className="flex-1 flex">
+        <div ref={containerRef} className="flex-1 relative">
+          <CytoscapeComponent
+            elements={elements}
+            stylesheet={stylesheet}
+            cy={(cy) => { cyRef.current = cy; }}
+            style={{ width: '100%', height: '100%' }}
+            className="w-full h-full"
+            minZoom={0.1}
+            maxZoom={2}
+            wheelSensitivity={0.2}
+          />
+        </div>
+        
+        {/* Side panel for selected node details */}
+        {selectedNode && (
+          <div className="w-64 border-l border-gray-200 p-3 bg-gray-50 overflow-y-auto">
+            <div className="flex justify-between items-center mb-2">
+              <h3 className="font-medium text-gray-900">Protein Details</h3>
+              <button 
+                onClick={() => setSelectedNode(null)}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                ✕
+              </button>
+            </div>
+            
+            <div className="p-3 bg-white rounded-md shadow-sm">
+              <p className="text-sm font-medium text-gray-900">{selectedNode.label}</p>
+              <p className="text-xs text-gray-500 mt-1">ID: {selectedNode.id}</p>
+              
+              {selectedNode.score && (
+                <div className="mt-2">
+                  <p className="text-xs font-medium text-gray-700">Confidence Score:</p>
+                  <div className="bg-gray-200 h-2 rounded-full mt-1">
+                    <div 
+                      className="bg-blue-500 h-2 rounded-full" 
+                      style={{ width: `${Math.round(selectedNode.score * 100)}%` }}
+                    />
+                  </div>
+                  <p className="text-right text-xs text-gray-600 mt-1">{Math.round(selectedNode.score * 100)}%</p>
+                </div>
+              )}
+              
+              {selectedNode.evidence && (
+                <div className="mt-3">
+                  <p className="text-xs font-medium text-gray-700">Evidence:</p>
+                  <p className="text-xs text-gray-600 mt-1">{selectedNode.evidence}</p>
+                </div>
+              )}
+              
+              {selectedNode.is_llm_generated && (
+                <div className="mt-3 p-2 bg-amber-50 rounded border border-amber-200">
+                  <p className="text-xs text-amber-800">
+                    This interaction was generated by LLM based on scientific literature.
+                  </p>
+                </div>
+              )}
+              
+              {/* External links */}
+              <div className="mt-3 pt-3 border-t border-gray-100">
+                <p className="text-xs font-medium text-gray-700 mb-2">External Resources:</p>
+                <div className="flex flex-col gap-2">
+                  <a 
+                    href={`https://www.uniprot.org/uniprotkb?query=${selectedNode.id}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-blue-600 hover:underline flex items-center"
+                  >
+                    View in UniProt
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3 ml-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                    </svg>
+                  </a>
+                  <a 
+                    href={`https://string-db.org/network/${selectedNode.id}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-blue-600 hover:underline flex items-center"
+                  >
+                    View in STRING-db
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3 ml-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                    </svg>
+                  </a>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+      
+      {/* Footer with controls */}
+      <div className="p-2 border-t border-gray-200 bg-gray-50 flex justify-between items-center">
+        <div className="text-xs text-gray-500">
+          {interactions.some(i => i.is_llm_generated) ? 
+            'Some interactions were generated with AI based on scientific literature' :
+            'All interactions from database and external APIs'}
+        </div>
+        <div className="flex space-x-1">
+          <button
+            onClick={() => { if (cyRef.current) cyRef.current.fit(); }}
+            className="px-2 py-1 bg-gray-100 hover:bg-gray-200 rounded text-xs text-gray-700"
+            title="Fit network to view"
+          >
+            Fit
+          </button>
+          <button
+            onClick={() => {
+              if (cyRef.current) {
+                // Apply layout with more spacing to prevent overlaps
+                const layout = cyRef.current.layout({
+                  name: elements.length <= 25 ? 'concentric' : 'cose',
+                  animate: true,
+                  avoidOverlap: true,
+                  spacingFactor: 2.0, // Increased from 1.5 for better separation
+                  minNodeSpacing: 120, // Increased from 80
+                  nodeRepulsion: 18000, // Higher value means nodes push each other away more strongly
+                  fit: true,
+                  padding: 80
+                });
+                layout.run();
+              }
+            }}
+            className="px-2 py-1 bg-gray-100 hover:bg-gray-200 rounded text-xs text-gray-700"
+            title="Rearrange network layout"
+          >
+            Rearrange
+          </button>
+          <button 
+            onClick={() => {
+              if (cyRef.current) {
+                // Apply a more spread out force-directed layout specifically for handling overlaps
+                const layout = cyRef.current.layout({
+                  name: 'cose',
+                  animate: true,
+                  fit: true,
+                  padding: 100,
+                  nodeRepulsion: 25000, // Very high repulsion to push overlapping nodes apart
+                  nodeOverlap: 100, // Higher value to strongly prevent overlaps
+                  idealEdgeLength: 250, // Longer edges to create more space
+                  edgeElasticity: 100,
+                  nestingFactor: 1.2,
+                  gravity: 50, // Reduced gravity to allow nodes to spread more
+                  numIter: 2500 // More iterations for better layout
+                });
+                layout.run();
+              }
+            }}
+            className="px-2 py-1 bg-blue-100 hover:bg-blue-200 rounded text-xs text-blue-700"
+            title="Fix overlapping nodes"
+          >
+            Fix Overlaps
           </button>
         </div>
       </div>
