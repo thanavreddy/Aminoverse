@@ -700,33 +700,29 @@ const KnowledgeGraphVisualizer = ({ graphData, entityId, entityType = "Protein" 
   // Initialize and apply layout when elements or container dimensions change
   useEffect(() => {
     // Skip if conditions aren't met
-    if (!cyRef.current || elements.length === 0 || !containerRef.current || visualState.error) {
+    if (!cyRef.current || elements.length === 0 || visualState.error) {
       return;
     }
-    
-    // Ensure container has dimensions before initializing
-    const rect = containerRef.current.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) {
-      console.warn("Container has zero dimensions, deferring knowledge graph layout");
+
+    const initializeGraph = () => {
+      // Ensure container has dimensions before initializing
+      if (!containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) {
+        console.warn("Container has zero dimensions, deferring knowledge graph layout");
+        
+        // Try again after a short delay to allow container to render
+        setTimeout(initializeGraph, 250);
+        return;
+      }
+
+      const cy = cyRef.current;
+      console.log(`Initializing knowledge graph with ${elements.length} elements`);
       
-      // Try again after a short delay to allow container to render
-      setTimeout(() => {
-        if (isMounted.current) {
-          setVisualState(prev => ({ ...prev })); // Force re-render
-        }
-      }, 250);
-      return;
-    }
+      // Clean up before adding new elements
+      cy.elements().remove();
+      cy.add(elements);
 
-    const cy = cyRef.current;
-    console.log(`Initializing knowledge graph with ${elements.length} elements`);
-    
-    // Clean up before adding new elements
-    cy.elements().remove();
-    cy.add(elements);
-
-    // Use a timeout to ensure the container is fully rendered
-    setTimeout(() => {
       try {
         // Choose an appropriate layout based on graph size
         const layoutName = elements.length <= 20 ? 'concentric' : 'cose';
@@ -753,18 +749,13 @@ const KnowledgeGraphVisualizer = ({ graphData, entityId, entityType = "Protein" 
           };
         } else {
           layoutOptions = {
-            name: 'cose',
+            name: 'grid', // Using grid instead of cose for better reliability
             animate: true,
             animationDuration: 500,
             nodeDimensionsIncludeLabels: true,
             padding: 50,
-            componentSpacing: 40,
-            nodeRepulsion: 6000,
-            nodeOverlap: 10,
-            idealEdgeLength: 100,
-            edgeElasticity: 100,
-            nestingFactor: 5,
-            gravity: 80
+            avoidOverlap: true,
+            fit: true
           };
         }
         
@@ -802,8 +793,11 @@ const KnowledgeGraphVisualizer = ({ graphData, entityId, entityType = "Protein" 
           console.error("Fallback layout also failed:", fallbackErr);
         }
       }
-    }, 200);
-  }, [elements, visualState.loading, containerRef.current]);
+    };
+
+    // Start initialization process
+    initializeGraph();
+  }, [elements, visualState.loading]);
 
   // Fix layout when container size changes
   useEffect(() => {
@@ -906,6 +900,7 @@ const KnowledgeGraphVisualizer = ({ graphData, entityId, entityType = "Protein" 
         <CytoscapeComponent
           elements={elements}
           stylesheet={stylesheet}
+          style={{ width: '100%', height: '100%' }} // Explicit dimensions
           layout={{ name: 'preset' }} // Initial layout, real layout applied in useEffect
           cy={(cy) => {
             cyRef.current = cy;
@@ -1104,33 +1099,29 @@ const InteractionNetworkVisualizer = ({ interactions = [], proteinId }) => {
   // Initialize and apply layout when elements or container dimensions change
   useEffect(() => {
     // Skip if conditions aren't met
-    if (!cyRef.current || elements.length === 0 || !containerRef.current || visualState.error) {
+    if (!cyRef.current || elements.length === 0 || visualState.error) {
       return;
     }
     
-    // Ensure container has dimensions before initializing
-    const rect = containerRef.current.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) {
-      console.warn("Container has zero dimensions, deferring network layout");
+    const initializeGraph = () => {
+      // Ensure container has dimensions before initializing
+      if (!containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) {
+        console.warn("Container has zero dimensions, deferring network layout");
+        
+        // Try again after a short delay to allow container to render
+        setTimeout(initializeGraph, 250);
+        return;
+      }
+
+      const cy = cyRef.current;
+      console.log(`Initializing interaction network with ${elements.length} elements`);
       
-      // Try again after a short delay to allow container to render
-      setTimeout(() => {
-        if (isMounted.current) {
-          setVisualState(prev => ({ ...prev })); // Force re-render
-        }
-      }, 250);
-      return;
-    }
+      // Clean up before adding new elements
+      cy.elements().remove();
+      cy.add(elements);
 
-    const cy = cyRef.current;
-    console.log(`Initializing network with ${elements.length} elements`);
-    
-    // Clean up before adding new elements
-    cy.elements().remove();
-    cy.add(elements);
-
-    // Use a timeout to ensure the container is fully rendered
-    setTimeout(() => {
       try {
         // Use a simple circle or grid layout which is more reliable
         const useCircleLayout = elements.length <= 20;
@@ -1175,8 +1166,11 @@ const InteractionNetworkVisualizer = ({ interactions = [], proteinId }) => {
           console.error("Fallback layout also failed:", fallbackErr);
         }
       }
-    }, 200);
-  }, [elements, visualState.loading, containerRef.current]);
+    };
+
+    // Start initialization process
+    initializeGraph();
+  }, [elements, visualState.loading]);
   
   // Fix layout when container size changes
   useEffect(() => {
@@ -1296,6 +1290,7 @@ const InteractionNetworkVisualizer = ({ interactions = [], proteinId }) => {
         <CytoscapeComponent
           elements={elements}
           stylesheet={stylesheet}
+          style={{ width: '100%', height: '100%' }} // Explicit dimensions
           layout={{ name: 'preset' }} // Initial layout, real layout applied in useEffect
           cy={(cy) => {
             cyRef.current = cy;
