@@ -480,6 +480,483 @@ const ProteinStructureVisualizer = ({ proteinId, structureData }) => {
   );
 };
 
+// KnowledgeGraphVisualizer component for the new knowledge graph visualization
+const KnowledgeGraphVisualizer = ({ graphData, entityId, entityType = "Protein" }) => {
+  const [visualState, setVisualState] = useState({
+    loading: true,
+    error: null,
+    initialized: false
+  });
+  const cyRef = useRef(null);
+  const containerRef = useRef(null);
+
+  // Track if the component is mounted to prevent state updates after unmounting
+  const isMounted = useRef(true);
+  useEffect(() => {
+    return () => { isMounted.current = false; };
+  }, []);
+
+  // Log the knowledge graph data received
+  useEffect(() => {
+    console.log("Knowledge graph data received:", { 
+      entityId, 
+      entityType,
+      nodesCount: graphData?.nodes?.length || 0,
+      edgesCount: graphData?.edges?.length || 0 
+    });
+
+    if (entityId) {
+      setVisualState(prev => ({ ...prev, loading: !graphData }));
+    }
+  }, [entityId, graphData]);
+
+  // Process the graph data into Cytoscape elements
+  const elements = React.useMemo(() => {
+    if (!graphData || !entityId) return [];
+
+    try {
+      const { nodes, edges } = graphData;
+      if (!nodes || !edges || nodes.length === 0) {
+        console.warn("Invalid knowledge graph data structure");
+        return [];
+      }
+
+      console.log(`Processing ${nodes.length} nodes and ${edges.length} edges`);
+
+      // Check if nodes have the expected structure
+      if (!nodes[0].id) {
+        console.error("Nodes don't have expected ID property", nodes[0]);
+        return [];
+      }
+
+      // Map nodes to Cytoscape format
+      const cyNodes = nodes.map(node => {
+        // Generate a color based on node type
+        const getNodeColor = (type) => {
+          switch(type?.toLowerCase()) {
+            case 'protein': return '#3B82F6'; // blue-500
+            case 'disease': return '#EF4444'; // red-500
+            case 'drug': return '#10B981';    // green-500
+            case 'pathway': return '#8B5CF6'; // purple-500
+            case 'gene': return '#F59E0B';    // amber-500
+            default: return '#6B7280';        // gray-500
+          }
+        };
+
+        // Get node size based on type and whether it's the central entity
+        const getNodeSize = (nodeId, type) => {
+          const isMainEntity = nodeId === entityId;
+          switch(type?.toLowerCase()) {
+            case 'protein': return isMainEntity ? 60 : 40;
+            case 'disease': return 45;
+            case 'drug': return 40;
+            case 'pathway': return 50;
+            case 'gene': return 35;
+            default: return 30;
+          }
+        };
+
+        return {
+          data: {
+            id: node.id,
+            label: node.label || node.name || node.id,
+            type: node.type || 'unknown',
+            color: getNodeColor(node.type),
+            size: getNodeSize(node.id, node.type),
+            centrality: node.id === entityId ? 1 : 0,
+            ...node // Include all original properties
+          }
+        };
+      });
+
+      // Map edges to Cytoscape format
+      const cyEdges = edges.map(edge => {
+        // Generate edge style based on relationship type
+        const getEdgeStyle = (type) => {
+          switch(type?.toLowerCase()) {
+            case 'interacts_with': return { color: '#93C5FD', width: 2 }; // blue-300
+            case 'targets': return { color: '#6EE7B7', width: 3 };        // green-300
+            case 'treats': return { color: '#FCD34D', width: 3 };         // amber-300
+            case 'associated_with': return { color: '#FDA4AF', width: 2 }; // red-300
+            case 'part_of': return { color: '#C4B5FD', width: 2 };        // purple-300
+            default: return { color: '#D1D5DB', width: 1 };               // gray-300
+          }
+        };
+
+        const edgeStyle = getEdgeStyle(edge.type);
+
+        return {
+          data: {
+            id: edge.id || `edge-${edge.source}-${edge.target}`,
+            source: edge.source,
+            target: edge.target,
+            label: edge.type || '',
+            type: edge.type || 'RELATED_TO',
+            color: edgeStyle.color,
+            width: edge.weight ? Math.max(edge.weight * 5, 1) : edgeStyle.width,
+            ...edge // Include all original properties
+          }
+        };
+      });
+
+      if (isMounted.current) {
+        setVisualState(prev => ({ ...prev, loading: false, error: null }));
+      }
+      return [...cyNodes, ...cyEdges];
+    } catch (err) {
+      console.error("Error processing knowledge graph data:", err);
+      if (isMounted.current) {
+        setVisualState(prev => ({ 
+          ...prev, 
+          loading: false, 
+          error: `Error processing knowledge graph data: ${err.message}` 
+        }));
+      }
+      return [];
+    }
+  }, [graphData, entityId]);
+
+  // Define Cytoscape stylesheet
+  const stylesheet = [
+    // Node styling
+    {
+      selector: 'node',
+      style: {
+        'label': 'data(label)',
+        'text-valign': 'center',
+        'text-halign': 'center',
+        'background-color': 'data(color)',
+        'text-outline-width': 2,
+        'text-outline-color': '#FFF',
+        'color': '#000',
+        'font-size': 12,
+        'width': 'data(size)',
+        'height': 'data(size)',
+        'text-wrap': 'wrap',
+        'text-max-width': '80px'
+      }
+    },
+    // Special styling for the main entity node
+    {
+      selector: 'node[centrality = 1]',
+      style: {
+        'border-width': 3,
+        'border-color': '#1E40AF', // blue-800
+        'font-weight': 'bold',
+        'font-size': 14
+      }
+    },
+    // Node type specific styling
+    {
+      selector: 'node[type = "Protein"]',
+      style: {
+        'shape': 'ellipse'
+      }
+    },
+    {
+      selector: 'node[type = "Disease"]',
+      style: {
+        'shape': 'diamond'
+      }
+    },
+    {
+      selector: 'node[type = "Drug"]',
+      style: {
+        'shape': 'round-rectangle'
+      }
+    },
+    {
+      selector: 'node[type = "Pathway"]',
+      style: {
+        'shape': 'hexagon'
+      }
+    },
+    // Edge styling
+    {
+      selector: 'edge',
+      style: {
+        'width': 'data(width)',
+        'line-color': 'data(color)',
+        'target-arrow-color': 'data(color)',
+        'target-arrow-shape': 'triangle',
+        'curve-style': 'bezier',
+        'opacity': 0.8
+      }
+    },
+    // Edge labels for important relationships
+    {
+      selector: 'edge[type = "TARGETS"], edge[type = "TREATS"]',
+      style: {
+        'label': 'data(type)',
+        'font-size': 10,
+        'text-background-color': '#FFFFFF',
+        'text-background-opacity': 0.7,
+        'text-background-padding': 2,
+        'text-background-shape': 'round-rectangle'
+      }
+    }
+  ];
+
+  // Initialize and apply layout when elements or container dimensions change
+  useEffect(() => {
+    // Skip if conditions aren't met
+    if (!cyRef.current || elements.length === 0 || !containerRef.current || visualState.error) {
+      return;
+    }
+    
+    // Ensure container has dimensions before initializing
+    const rect = containerRef.current.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) {
+      console.warn("Container has zero dimensions, deferring knowledge graph layout");
+      
+      // Try again after a short delay to allow container to render
+      setTimeout(() => {
+        if (isMounted.current) {
+          setVisualState(prev => ({ ...prev })); // Force re-render
+        }
+      }, 250);
+      return;
+    }
+
+    const cy = cyRef.current;
+    console.log(`Initializing knowledge graph with ${elements.length} elements`);
+    
+    // Clean up before adding new elements
+    cy.elements().remove();
+    cy.add(elements);
+
+    // Use a timeout to ensure the container is fully rendered
+    setTimeout(() => {
+      try {
+        // Choose an appropriate layout based on graph size
+        const layoutName = elements.length <= 20 ? 'concentric' : 'cose';
+        
+        let layoutOptions = {};
+        if (layoutName === 'concentric') {
+          layoutOptions = {
+            name: 'concentric',
+            concentric: function(node) {
+              // Main entity in center, then by type importance
+              if (node.data('centrality') === 1) return 10;
+              switch(node.data('type').toLowerCase()) {
+                case 'protein': return 8;
+                case 'disease': return 6;
+                case 'drug': return 4;
+                case 'pathway': return 2;
+                default: return 0;
+              }
+            },
+            levelWidth: function() { return 1; },
+            animate: true,
+            animationDuration: 500,
+            padding: 50
+          };
+        } else {
+          layoutOptions = {
+            name: 'cose',
+            animate: true,
+            animationDuration: 500,
+            nodeDimensionsIncludeLabels: true,
+            padding: 50,
+            componentSpacing: 40,
+            nodeRepulsion: 6000,
+            nodeOverlap: 10,
+            idealEdgeLength: 100,
+            edgeElasticity: 100,
+            nestingFactor: 5,
+            gravity: 80
+          };
+        }
+        
+        // Apply the layout
+        const layout = cy.layout(layoutOptions);
+        layout.run();
+        
+        // Center and fit the graph in the container
+        cy.center();
+        cy.fit(undefined, 40);
+        
+        // Mark as initialized
+        if (isMounted.current) {
+          setVisualState(prev => ({ ...prev, initialized: true }));
+        }
+        
+        console.log("Knowledge graph layout applied successfully");
+      } catch (err) {
+        console.error("Error applying knowledge graph layout:", err);
+        
+        // Try a simple circle layout as fallback
+        try {
+          const fallbackLayout = cy.layout({ 
+            name: 'circle',
+            animate: false
+          });
+          fallbackLayout.run();
+          cy.center();
+          cy.fit();
+          
+          if (isMounted.current) {
+            setVisualState(prev => ({ ...prev, initialized: true }));
+          }
+        } catch (fallbackErr) {
+          console.error("Fallback layout also failed:", fallbackErr);
+        }
+      }
+    }, 200);
+  }, [elements, visualState.loading, containerRef.current]);
+
+  // Fix layout when container size changes
+  useEffect(() => {
+    const handleResize = () => {
+      if (cyRef.current && elements.length && containerRef.current) {
+        cyRef.current.resize();
+        cyRef.current.center();
+        cyRef.current.fit(undefined, 40);
+      }
+    };
+    
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, [elements]);
+
+  // Empty state - no entity selected
+  if (!entityId) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full border border-gray-200 rounded-md p-8 text-center">
+        <svg xmlns="http://www.w3.org/2000/svg" className="h-16 w-16 text-gray-300 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M13.5 10.5L21 3m0 0l-7.5 7.5M21 3h-7.5m0 0v7.5M10.5 13.5L3 21m0 0l7.5-7.5M3 21h7.5m0 0v-7.5" />
+        </svg>
+        <p className="text-gray-500">Select a protein to view its knowledge graph</p>
+      </div>
+    );
+  }
+  
+  // Loading state
+  if (visualState.loading) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full p-8">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
+        <p className="text-gray-500 mt-4 font-medium">Loading knowledge graph...</p>
+        <p className="text-gray-400 mt-2 text-sm">Building network for {entityId}</p>
+      </div>
+    );
+  }
+  
+  // Error state
+  if (visualState.error) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full p-8 text-center">
+        <div className="mb-4">
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-16 w-16 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+        </div>
+        <p className="text-gray-700 font-medium">Error showing knowledge graph</p>
+        <p className="text-sm text-gray-500 mt-2 max-w-md">{visualState.error}</p>
+      </div>
+    );
+  }
+
+  // No graph data
+  if (!elements.length) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full p-8 text-center">
+        <div className="mb-4">
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-16 w-16 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M12 14h.01" />
+          </svg>
+        </div>
+        <p className="text-gray-700 font-medium">No knowledge graph data found</p>
+        <p className="text-sm text-gray-500 mt-2 max-w-md">
+          No knowledge graph data is available for {entityId}.
+        </p>
+      </div>
+    );
+  }
+
+  // Success state - knowledge graph visualization
+  return (
+    <div className="h-full border border-gray-200 rounded-md">
+      {/* Header with entity info */}
+      <div className="p-2 border-b border-gray-200 flex justify-between items-center bg-gray-50">
+        <div className="text-sm">
+          <span className="font-medium text-gray-700">{entityId}</span>
+          <span className="ml-2 text-xs text-blue-500">
+            {graphData?.nodes?.length || 0} nodes, {graphData?.edges?.length || 0} connections
+          </span>
+        </div>
+        <div className="flex items-center text-xs space-x-3">
+          <div className="flex items-center">
+            <div className="w-3 h-3 rounded-full bg-blue-500 mr-1"></div>
+            <span>Protein</span>
+          </div>
+          <div className="flex items-center">
+            <div className="w-3 h-3 rounded-full bg-red-500 mr-1"></div>
+            <span>Disease</span>
+          </div>
+          <div className="flex items-center">
+            <div className="w-3 h-3 rounded-full bg-green-500 mr-1"></div>
+            <span>Drug</span>
+          </div>
+        </div>
+      </div>
+      
+      {/* Graph container */}
+      <div ref={containerRef} className="h-[calc(100%-36px)] w-full relative">
+        <CytoscapeComponent
+          elements={elements}
+          stylesheet={stylesheet}
+          layout={{ name: 'preset' }} // Initial layout, real layout applied in useEffect
+          cy={(cy) => {
+            cyRef.current = cy;
+            
+            // Add hover interactivity for nodes
+            cy.on('mouseover', 'node', function(e) {
+              e.target.style({
+                'border-width': 2,
+                'border-color': '#2563EB',
+                'border-opacity': 1
+              });
+            });
+            
+            cy.on('mouseout', 'node', function(e) {
+              if (e.target.data('centrality') !== 1) {
+                e.target.style({
+                  'border-width': 0
+                });
+              }
+            });
+            
+            // Show info on node click
+            cy.on('tap', 'node', function(e) {
+              const node = e.target;
+              const data = node.data();
+              
+              // Show info about the node when clicked
+              console.log("Node clicked:", data);
+              // Future enhancement: Show a tooltip or modal with node details
+            });
+          }}
+          className="h-full w-full"
+          minZoom={0.5}
+          maxZoom={2.5}
+          boxSelectionEnabled={false}
+        />
+        
+        {/* Loading overlay while the graph is rendering */}
+        {!visualState.initialized && (
+          <div className="absolute inset-0 flex items-center justify-center bg-white bg-opacity-75">
+            <div className="flex flex-col items-center">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
+              <p className="mt-2 text-sm text-gray-600">Generating knowledge graph visualization...</p>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
 // Improved InteractionNetworkVisualizer with simplified layout for better stability
 const InteractionNetworkVisualizer = ({ interactions = [], proteinId }) => {
   const [visualState, setVisualState] = useState({
@@ -1171,6 +1648,7 @@ const AminoVerseUI = () => {
   const [proteinData, setProteinData] = useState(null);
   const [structureData, setStructureData] = useState(null);
   const [interactionsData, setInteractionsData] = useState([]);
+  const [knowledgeGraphData, setKnowledgeGraphData] = useState(null); // New state for knowledge graph data
   const [isLoading, setIsLoading] = useState(false);
   const [followUpSuggestions, setFollowUpSuggestions] = useState([]);
   const [activeTab, setActiveTab] = useState(0);
@@ -1228,50 +1706,86 @@ const AminoVerseUI = () => {
             console.log("Structure data fetched separately:", structureResponse);
           } catch (error) {
             console.error("Error fetching structure data:", error);
+            setStructureData(null);
           }
         }
         
-        // If interactions are included
-        if (response.data.interactions && response.data.interactions.length > 0) {
+        // If interactions are included in the response
+        if (response.visualization_data && response.visualization_type === 'interactions') {
+          console.log("Interaction data from visualization_data:", response.visualization_data);
+          setInteractionsData(response.visualization_data);
+          setActiveTab(1); // Switch to Interaction Network tab
+        } else if (response.data.interactions && response.data.interactions.length > 0) {
           setInteractionsData(response.data.interactions);
           console.log("Interactions from main response:", response.data.interactions);
         } else {
-          // Otherwise fetch them separately
+          // Fetch interactions separately
+          await handleInteractionsResponse(response.data.id);
+        }
+        
+        // If knowledge graph is included in the response
+        if (response.visualization_data && response.visualization_type === 'knowledge_graph') {
+          console.log("Knowledge graph from visualization_data:", response.visualization_data);
+          setKnowledgeGraphData(response.visualization_data);
+          setActiveTab(2); // Switch to Knowledge Graph tab
+        } else {
+          // Always fetch knowledge graph data separately
           try {
-            const interactionsResponse = await apiService.getProteinInteractions(response.data.id);
-            if (interactionsResponse && interactionsResponse.length > 0) {
-              setInteractionsData(interactionsResponse);
-              console.log("Interactions fetched separately:", interactionsResponse);
+            console.log("Fetching knowledge graph separately for:", response.data.id);
+            // Add a timeout to prevent hanging and multiple identical requests
+            const knowledgeGraphPromise = apiService.getKnowledgeGraph(response.data.id, 'Protein');
+            const timeoutPromise = new Promise((_, reject) => 
+              setTimeout(() => reject(new Error('Knowledge graph request timed out')), 15000)
+            );
+            
+            const knowledgeGraphResponse = await Promise.race([knowledgeGraphPromise, timeoutPromise]);
+            console.log("Knowledge graph API response:", knowledgeGraphResponse);
+            
+            if (knowledgeGraphResponse && 
+                knowledgeGraphResponse.nodes && 
+                Array.isArray(knowledgeGraphResponse.nodes) && 
+                knowledgeGraphResponse.edges && 
+                Array.isArray(knowledgeGraphResponse.edges)) {
+                
+              console.log("Valid knowledge graph data structure with:", 
+                knowledgeGraphResponse.nodes.length, "nodes and", 
+                knowledgeGraphResponse.edges.length, "edges");
+              setKnowledgeGraphData(knowledgeGraphResponse);
             } else {
-              console.log("No interactions found for this protein");
-              setInteractionsData([]);
+              console.warn("Invalid knowledge graph data structure:", knowledgeGraphResponse);
+              setKnowledgeGraphData(null);
             }
           } catch (error) {
-            console.error("Error fetching interaction data:", error);
-            setInteractionsData([]);
+            console.error("Error or timeout fetching knowledge graph:", error);
+            setKnowledgeGraphData(null);
           }
+        }
+        
+        // Determine which visualization tab to show based on query content
+        if (searchQuery.toLowerCase().includes('interaction') || 
+            searchQuery.toLowerCase().includes('network')) {
+          setActiveTab(1); // Interaction Network tab
+        } else if (searchQuery.toLowerCase().includes('knowledge graph') || 
+                   searchQuery.toLowerCase().includes('graph')) {
+          setActiveTab(2); // Knowledge Graph tab
         }
         
         // Set follow-up suggestions based on the protein
         setFollowUpSuggestions([
           `How does ${response.data.id} relate to cancer?`,
           `What drugs target ${response.data.id}?`,
-          `Show ${response.data.id} structure`,
+          `Show me the knowledge graph for ${response.data.id}`,
           `Show interactions for ${response.data.id}`
         ]);
         
-        // Switch to structure tab by default when showing protein data
-        setActiveTab(0);
       } else if (response.follow_up_suggestions && response.follow_up_suggestions.length > 0) {
-        // If the API returned follow-up suggestions
         setFollowUpSuggestions(response.follow_up_suggestions);
       } else {
-        // Default suggestions for general queries
+        // Default suggestions
         setFollowUpSuggestions([
-          'Try searching for TP53',
-          'What proteins are involved in cancer?',
-          'Explain protein folding',
-          'Compare TP53 to MDM2'
+          'Tell me about TP53',
+          'What is a protein?',
+          'Show me the structure of BRCA1'
         ]);
       }
       
@@ -1295,6 +1809,87 @@ const AminoVerseUI = () => {
       ]);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  // Handle fetching protein diseases
+  const fetchProteinDiseases = async (proteinId) => {
+    try {
+      console.log("Fetching diseases for:", proteinId);
+      const response = await apiService.getProteinDiseases(proteinId);
+      console.log("Disease API response:", response);
+      
+      // Check if the response contains visualization data for knowledge graph
+      if (response && response.knowledge_graph && 
+          response.knowledge_graph.nodes && 
+          response.knowledge_graph.edges) {
+        console.log("Knowledge graph data found in diseases response:", response.knowledge_graph);
+        // Update the knowledge graph data and switch to that tab
+        setKnowledgeGraphData(response.knowledge_graph);
+        setActiveTab(2); // Switch to Knowledge Graph tab
+        return response.diseases || []; // Return just the diseases part
+      }
+      
+      // If response is just an array, it's only disease data
+      return Array.isArray(response) ? response : [];
+    } catch (error) {
+      console.error("Error fetching disease data:", error);
+      return [];
+    }
+  };
+
+  // Handle the interactions API response properly with knowledge graph data if available
+  const handleInteractionsResponse = async (proteinId) => {
+    try {
+      console.log("Fetching interactions separately for:", proteinId);
+      const interactionsResponse = await apiService.getProteinInteractions(proteinId);
+      console.log("Interactions API response:", interactionsResponse);
+      
+      // Check if the response is a complex object with interactions and knowledge graph
+      if (interactionsResponse && typeof interactionsResponse === 'object' && !Array.isArray(interactionsResponse)) {
+        // If it has interactions array, extract it
+        if (interactionsResponse.interactions && Array.isArray(interactionsResponse.interactions)) {
+          setInteractionsData(interactionsResponse.interactions);
+          console.log("Interactions data extracted:", interactionsResponse.interactions.length, "interactions");
+        }
+        
+        // If it has knowledge graph data, extract and use it
+        if (interactionsResponse.knowledge_graph && 
+            interactionsResponse.knowledge_graph.nodes && 
+            Array.isArray(interactionsResponse.knowledge_graph.nodes)) {
+          console.log("Knowledge graph found in interactions response:", 
+            interactionsResponse.knowledge_graph.nodes.length, "nodes",
+            interactionsResponse.knowledge_graph.edges.length, "edges");
+          setKnowledgeGraphData(interactionsResponse.knowledge_graph);
+        }
+        
+        // If visualization type is specified, switch to that tab
+        if (interactionsResponse.visualization_type) {
+          if (interactionsResponse.visualization_type === 'knowledge_graph') {
+            setActiveTab(2); // Knowledge Graph tab
+          } else if (interactionsResponse.visualization_type === 'network_and_graph') {
+            // For network_and_graph, prefer the knowledge graph tab if we have data
+            if (interactionsResponse.knowledge_graph && 
+                interactionsResponse.knowledge_graph.nodes && 
+                interactionsResponse.knowledge_graph.nodes.length > 0) {
+              setActiveTab(2); // Knowledge Graph tab
+            } else {
+              setActiveTab(1); // Interaction Network tab
+            }
+          }
+        }
+      } 
+      // If the response is just an array, it's only interactions data
+      else if (Array.isArray(interactionsResponse)) {
+        setInteractionsData(interactionsResponse);
+        console.log("Simple array of interactions received:", interactionsResponse.length, "interactions");
+      } else {
+        console.warn("Unexpected interaction data format:", interactionsResponse);
+        setInteractionsData([]);
+      }
+    } catch (error) {
+      console.error("Error fetching interaction data:", error);
+      setInteractionsData([]);
     }
   };
 
@@ -1426,6 +2021,12 @@ const AminoVerseUI = () => {
                 >
                   Interaction Network
                 </button>
+                <button 
+                  className={`flex-1 py-2 ${activeTab === 2 ? 'bg-blue-500 text-white' : 'text-blue-500'} ${activeTab === 2 ? 'border-b-2 border-blue-700' : ''}`}
+                  onClick={() => setActiveTab(2)}
+                >
+                  Knowledge Graph
+                </button>
               </div>
               
               {/* Tab content */}
@@ -1435,10 +2036,16 @@ const AminoVerseUI = () => {
                     proteinId={activeProtein} 
                     structureData={structureData}
                   />
-                ) : (
+                ) : activeTab === 1 ? (
                   <InteractionNetworkVisualizer 
                     interactions={interactionsData} 
                     proteinId={activeProtein}
+                  />
+                ) : (
+                  <KnowledgeGraphVisualizer 
+                    graphData={knowledgeGraphData}
+                    entityId={activeProtein}
+                    entityType="Protein"
                   />
                 )}
               </div>
@@ -1447,7 +2054,7 @@ const AminoVerseUI = () => {
             {/* Footer with data sources */}
             <div className="p-3 text-xs text-gray-500 border-t border-gray-200 flex justify-between items-center">
               <div>
-                <p>Data sources: UniProt, PDB, STRING-db</p>
+                <p>Data sources: UniProt, PDB, STRING-db, Neo4j Knowledge Graph</p>
                 <p>Last updated: {getCurrentDate()}</p>
               </div>
               <button

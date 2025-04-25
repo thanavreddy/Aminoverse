@@ -434,3 +434,64 @@ class Neo4jDatabase:
     async def run_query(self, query: str, parameters: Dict[str, Any] = None) -> List[Dict[str, Any]]:
         """Run a custom Cypher query and return the results."""
         return await self.execute_query(query, parameters)
+    
+    async def create_protein_drug_interaction(
+        self, 
+        protein_id: str, 
+        drug_id: str, 
+        drug_name: str, 
+        mechanism: str = "",
+        confidence: float = 0.8
+    ) -> bool:
+        """Create a protein-drug interaction in the knowledge graph.
+        
+        Args:
+            protein_id: The ID of the protein
+            drug_id: The ID of the drug
+            drug_name: The name of the drug
+            mechanism: The mechanism of action
+            confidence: The confidence score (0-1)
+            
+        Returns:
+            bool: True if successful
+        """
+        try:
+            # Create the drug node if it doesn't exist
+            query1 = """
+            MERGE (d:Drug {id: $drug_id})
+            ON CREATE SET d.name = $drug_name, d.created_at = datetime()
+            ON MATCH SET d.updated_at = datetime()
+            RETURN d
+            """
+            
+            # Link the drug to the protein
+            query2 = """
+            MATCH (p:Protein {id: $protein_id})
+            MATCH (d:Drug {id: $drug_id})
+            MERGE (d)-[r:TARGETS]->(p)
+            ON CREATE SET r.mechanism = $mechanism, 
+                         r.confidence = $confidence,
+                         r.created_at = datetime()
+            ON MATCH SET r.mechanism = $mechanism,
+                        r.confidence = $confidence,
+                        r.updated_at = datetime()
+            RETURN r
+            """
+            
+            # Execute queries
+            await self.execute_query(query1, {
+                "drug_id": drug_id,
+                "drug_name": drug_name
+            })
+            
+            result = await self.execute_query(query2, {
+                "protein_id": protein_id,
+                "drug_id": drug_id,
+                "mechanism": mechanism,
+                "confidence": confidence
+            })
+            
+            return len(result) > 0
+        except Exception as e:
+            logger.error(f"Error creating protein-drug interaction: {str(e)}")
+            return False
