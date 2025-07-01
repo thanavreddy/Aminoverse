@@ -66,7 +66,7 @@ Before running the application, ensure you have:
 1. **Clone the repository**
    ```bash
    git clone https://github.com/pradeepmajji853/Aminoverse.git
-   cd aminoverse
+   cd aminoverse/aminoverse
    ```
 
 2. **Install dependencies**
@@ -215,12 +215,4 @@ Ensure the backend is running on `http://localhost:8000` before starting the fro
 - Enable gzip compression on server
 - Implement code splitting for large applications
 - Monitor bundle size with `npm run build`
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
 
