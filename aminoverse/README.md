@@ -65,8 +65,8 @@ Before running the application, ensure you have:
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/your-username/aminoverse.git
-   cd aminoverse/aminoverse
+   git clone https://github.com/pradeepmajji853/Aminoverse.git
+   cd aminoverse
    ```
 
 2. **Install dependencies**
